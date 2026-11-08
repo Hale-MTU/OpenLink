@@ -36,3 +36,9 @@ JDK 17 or 21 and the Android SDK (platform 37).
 
 runs the unit tests (the trust rules, session ownership and the client's replay run on the
 JVM) and lint of the three modules.
+
+## License
+
+OpenLink is free software under the GNU Affero General Public License, version 3 or (at your
+option) any later version (AGPL-3.0-or-later), the same license as OpenVitals and OpenWatch.
+See [LICENSE](LICENSE). An app that includes the library is a work based on it.
