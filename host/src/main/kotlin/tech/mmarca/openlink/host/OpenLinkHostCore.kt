@@ -72,7 +72,7 @@ class OpenLinkHostCore(
                 existing.copy(capabilities = existing.capabilities + requested, requested = requested, appVersion = hello.appVersion)
             else -> existing.copy(requested = requested, appVersion = hello.appVersion)
         }
-        save(existing, next)
+        save(existing, next.copy(lastSeenAtMillis = now))
         return decisionFor(next, version)
     }
 
@@ -118,6 +118,20 @@ class OpenLinkHostCore(
         val existing = store.get(packageName) ?: return
         if (existing.trust != OpenLinkTrust.TRUSTED || capability !in existing.requested) return
         save(existing, existing.copy(capabilities = existing.capabilities + capability, updatedAtMillis = clock()))
+    }
+
+    /** The client went away (unbound, stopped, or died): its "last connected" time. */
+    @Synchronized
+    fun onDisconnected(packageName: String) {
+        val existing = store.get(packageName) ?: return
+        save(existing, existing.copy(lastSeenAtMillis = clock()))
+    }
+
+    /** The host took a body profile from [packageName]. */
+    @Synchronized
+    fun onProfileReceived(packageName: String) {
+        val existing = store.get(packageName) ?: return
+        save(existing, existing.copy(profileReceivedAtMillis = clock()))
     }
 
     /** Drops the record: the app is unknown again and its next hello starts over. */

@@ -17,7 +17,8 @@ class OpenLinkHostCoreTest {
 
     private val storage = MapStorage()
     private val firstParty = "AA:BB:cc:dd"
-    private fun core() = OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = setOf(firstParty), clock = { 1_000L })
+    private var now = 1_000L
+    private fun core() = OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = setOf(firstParty), clock = { now })
 
     private val vitals = OpenLinkCaller(10_001, "tech.mmarca.openvitals", "aabbccdd")
     private val stranger = OpenLinkCaller(10_002, "com.example.other", "1234")
@@ -102,5 +103,35 @@ class OpenLinkHostCoreTest {
     @Test
     fun `a newer protocol speaks this side's version`() {
         assertThat(core().hello(vitals, OpenLinkHello(protocolVersion = 9)).protocolVersion).isEqualTo(OpenLink.PROTOCOL_VERSION)
+    }
+
+    @Test
+    fun `hello, leaving and a received profile are remembered across a restart, without a trust change`() {
+        val changes = mutableListOf<String>()
+        val core = core().apply { onTrustChanged = { packageName, _, _ -> changes += packageName } }
+        core.hello(vitals, all)
+        changes.clear()
+
+        now = 2_000L
+        core.onProfileReceived(vitals.packageName)
+        now = 3_000L
+        core.onDisconnected(vitals.packageName)
+
+        val record = core().clients.value.single()
+        assertThat(record.profileReceivedAtMillis).isEqualTo(2_000L)
+        assertThat(record.lastSeenAtMillis).isEqualTo(3_000L)
+        assertThat(record.trust).isEqualTo(OpenLinkTrust.TRUSTED)
+        assertThat(changes).isEmpty()
+    }
+
+    @Test
+    fun `a record written before the activity fields reads with them unset`() {
+        storage.map["client.com.example.old"] = "1234\tTRUSTED\tdevices\tdevices\t5\t1.0"
+
+        val record = core().clients.value.single()
+
+        assertThat(record.capabilities).containsExactly("devices")
+        assertThat(record.lastSeenAtMillis).isEqualTo(0L)
+        assertThat(record.profileReceivedAtMillis).isEqualTo(0L)
     }
 }

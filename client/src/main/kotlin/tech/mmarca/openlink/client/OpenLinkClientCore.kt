@@ -24,8 +24,14 @@ sealed interface OpenLinkStatus {
     /** The client is not started, or was stopped. */
     data object Stopped : OpenLinkStatus
 
-    /** The host app is not installed, or exports no OpenLink service this client may bind. */
+    /** The host app is not installed, or exports no OpenLink service. */
     data object HostMissing : OpenLinkStatus
+
+    /**
+     * The host is installed but Android refused the binding: an older host that guards its
+     * service with a permission this app was not granted (installed before the host).
+     */
+    data object Unreachable : OpenLinkStatus
 
     /** Binding, or the host went away and a rebind is pending. */
     data object Connecting : OpenLinkStatus
@@ -46,6 +52,7 @@ sealed interface OpenLinkStatus {
 class OpenLinkClientCore(
     private val requestedCapabilities: Set<String>,
     private val appVersion: String,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val _status = MutableStateFlow<OpenLinkStatus>(OpenLinkStatus.Stopped)
     val status: StateFlow<OpenLinkStatus> = _status.asStateFlow()
@@ -62,6 +69,11 @@ class OpenLinkClientCore(
     private val _liveBatches = MutableSharedFlow<OpenLinkLiveBatch>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val liveBatches: SharedFlow<OpenLinkLiveBatch> = _liveBatches.asSharedFlow()
 
+    private val _profileExchangedAtMillis = MutableStateFlow(0L)
+
+    /** When a body profile last went to the host or came from it on this run; 0 if not yet. */
+    val profileExchangedAtMillis: StateFlow<Long> = _profileExchangedAtMillis.asStateFlow()
+
     private var host: IOpenLinkHost? = null
     private var pendingProfile: OpenLinkProfile? = null
     private val recordings = linkedMapOf<String, OpenLinkRecordingRequest>()
@@ -71,18 +83,22 @@ class OpenLinkClientCore(
     val events: Events = Events()
 
     fun onStarting() {
-        if (_status.value == OpenLinkStatus.Stopped || _status.value == OpenLinkStatus.HostMissing) {
+        val now = _status.value
+        if (now == OpenLinkStatus.Stopped || now == OpenLinkStatus.HostMissing || now == OpenLinkStatus.Unreachable) {
             _status.value = OpenLinkStatus.Connecting
         }
     }
 
-    fun onHostMissing() {
+    /** Binding failed: [installed] says whether the host app is there and refused, or absent. */
+    fun onHostMissing(installed: Boolean = false) {
         host = null
-        _status.value = OpenLinkStatus.HostMissing
+        _status.value = if (installed) OpenLinkStatus.Unreachable else OpenLinkStatus.HostMissing
         _devices.value = emptyList()
     }
 
     fun onStopped() {
+        // Tell the host first, so it shows this app as gone now, not when the service unbinds.
+        runCatching { host?.setListener(null) }
         host = null
         _status.value = OpenLinkStatus.Stopped
         _devices.value = emptyList()
@@ -152,6 +168,7 @@ class OpenLinkClientCore(
         if (state.has(OpenLink.CAPABILITY_DEVICES)) _devices.value = host.devices.orEmpty().real() else _devices.value = emptyList()
         if (state.has(OpenLink.CAPABILITY_PROFILE)) {
             _hostProfile.value = host.profile?.takeUnless { it.isEmpty }
+            if (_hostProfile.value != null) _profileExchangedAtMillis.value = clock()
             flushProfile()
         } else {
             _hostProfile.value = null
@@ -171,6 +188,7 @@ class OpenLinkClientCore(
         if (!granted(OpenLink.CAPABILITY_PROFILE)) return
         host?.setProfile(profile) ?: return
         pendingProfile = null
+        _profileExchangedAtMillis.value = clock()
     }
 
     private fun List<OpenLinkDevice>.real(): List<OpenLinkDevice> = filter { it.id.isNotEmpty() }
@@ -180,7 +198,9 @@ class OpenLinkClientCore(
         fun onStateChanged(state: OpenLinkState) = applyState(state)
 
         fun onProfileChanged(profile: OpenLinkProfile) {
-            if (granted(OpenLink.CAPABILITY_PROFILE)) _hostProfile.value = profile.takeUnless { it.isEmpty }
+            if (!granted(OpenLink.CAPABILITY_PROFILE)) return
+            _hostProfile.value = profile.takeUnless { it.isEmpty }
+            if (!profile.isEmpty) _profileExchangedAtMillis.value = clock()
         }
 
         fun onDevicesChanged(devices: List<OpenLinkDevice>) {

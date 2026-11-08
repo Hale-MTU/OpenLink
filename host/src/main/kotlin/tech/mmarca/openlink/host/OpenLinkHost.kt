@@ -4,6 +4,9 @@ import android.app.PendingIntent
 import android.os.Binder
 import android.os.RemoteCallbackList
 import android.util.Log
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import tech.mmarca.openlink.IOpenLinkHost
 import tech.mmarca.openlink.IOpenLinkListener
 import tech.mmarca.openlink.OpenLink
@@ -33,10 +36,21 @@ class OpenLinkHost(
 ) {
     private val sessions = OpenLinkSessions()
 
+    private val _connected = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * The packages bound now with a listener: "in use". A client leaves it when it clears
+     * its listener, dies, or the last binding to the service goes ([onAllUnbound]).
+     */
+    val connected: StateFlow<Set<String>> = _connected.asStateFlow()
+
+    /** The recording sessions and live subscriptions clients hold now. */
+    val activeSessions: StateFlow<List<OpenLinkActiveSession>> = sessions.active
+
     private val listeners = object : RemoteCallbackList<IOpenLinkListener>() {
         override fun onCallbackDied(callback: IOpenLinkListener, cookie: Any?) {
-            // A client that crashed or unbound leaves nothing running on its behalf.
-            (cookie as? OpenLinkCaller)?.let { endSessions(it.packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED) }
+            // A client that crashed leaves nothing running on its behalf.
+            (cookie as? OpenLinkCaller)?.let { left(it.packageName) }
         }
     }
 
@@ -67,10 +81,18 @@ class OpenLinkHost(
                 stale.forEach(listeners::unregister)
                 if (listener != null) listeners.register(listener, caller)
             }
+            if (listener != null) {
+                _connected.value = _connected.value + caller.packageName
+            } else {
+                // A client that stops cleanly clears its listener first: it is gone.
+                left(caller.packageName)
+            }
         }
 
-        override fun setProfile(profile: OpenLinkProfile?) =
-            gated(OpenLink.CAPABILITY_PROFILE) { capabilities.setProfile(it, profile ?: return@gated) }
+        override fun setProfile(profile: OpenLinkProfile?) = gated(OpenLink.CAPABILITY_PROFILE) { caller ->
+            capabilities.setProfile(caller, profile ?: return@gated)
+            core.onProfileReceived(caller.packageName)
+        }
 
         override fun getProfile(): OpenLinkProfile =
             gatedValue(OpenLink.CAPABILITY_PROFILE, OpenLinkProfile.EMPTY) { capabilities.profile() }
@@ -132,7 +154,31 @@ class OpenLinkHost(
     /** Whether any client is bound with a listener. */
     fun hasListeners(): Boolean = synchronized(listeners) { listeners.registeredCallbackCount > 0 }
 
+    /**
+     * Every binding to the service is gone (OpenLinkHostService.onUnbind). A client that
+     * unbound without clearing its listener is still alive, so no death notice comes for it:
+     * this is where it leaves.
+     */
+    fun onAllUnbound() {
+        val packages = synchronized(listeners) {
+            val count = listeners.registeredCallbackCount
+            val items = (0 until count).map { i -> listeners.getRegisteredCallbackItem(i) to listeners.getRegisteredCallbackCookie(i) }
+            items.forEach { (item, _) -> listeners.unregister(item) }
+            items.mapNotNull { (_, cookie) -> (cookie as? OpenLinkCaller)?.packageName }.toSet()
+        }
+        (packages + _connected.value).forEach(::left)
+    }
+
     // --- internals
+
+    /** [packageName] went away: nothing keeps running for it, and its "last connected" moves. */
+    private fun left(packageName: String) {
+        endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED)
+        if (packageName in _connected.value) {
+            _connected.value = _connected.value - packageName
+            core.onDisconnected(packageName)
+        }
+    }
 
     private fun caller(): OpenLinkCaller? = resolver.resolve(Binder.getCallingUid())
 
