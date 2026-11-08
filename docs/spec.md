@@ -39,30 +39,22 @@ either side goes away.
 
 ## Identity and permission
 
-The host declares a permission named after its own package, so a debug build and a release
-build of the host can be installed side by side:
-
-```xml
-<permission
-    android:name="${applicationId}.permission.OPENLINK"
-    android:protectionLevel="normal"
-    android:label="@string/openlink_permission_label"
-    android:description="@string/openlink_permission_description" />
-```
-
-and exports the service behind it. A client declares
-`<uses-permission android:name="tech.mmarca.openwatch.permission.OPENLINK" />` (plus the
-`.debug` one if it talks to a debug host) and lists the host in `<queries>`
-(`<package android:name="tech.mmarca.openwatch" />`), or the service is invisible to
-`bindService` on Android 11 and newer. The host needs no `<queries>` entry for its clients:
+The host exports the service with no `android:permission`. A client lists the host in
+`<queries>` (`<package android:name="tech.mmarca.openwatch" />`), or the service is invisible
+to `bindService` on Android 11 and newer. The host needs no `<queries>` entry for its clients:
 an app that binds to a service is visible to it.
 
-The permission only keeps apps that never asked from binding. Trust is the host's decision,
-made per call from the caller's identity: the host resolves `Binder.getCallingUid()` to its
-one package (a uid shared by several packages is refused) and the SHA-256 of its current
-signing certificate, and looks that pair up in its trust store. A `signature|knownSigner`
-permission would do part of this in the platform, but only from Android 12, and the apps run
-from Android 8; the trust store works the same on every version.
+An earlier draft guarded the service with a `normal` permission the host defined. It protected
+nothing (any app may ask for a normal permission and gets it at install), and it broke the
+link in the common case: Android grants a custom permission only if its definer is installed
+first, so a client installed or updated before the host was refused the binding until it was
+reinstalled. A client may keep the `<uses-permission>` for an older host; a host ignores it.
+
+Trust is the host's decision, made per call from the caller's identity: the host resolves
+`Binder.getCallingUid()` to its one package (a uid shared by several packages is refused) and
+the SHA-256 of its current signing certificate, and looks that pair up in its trust store. A
+`signature|knownSigner` permission would do part of this in the platform, but only from
+Android 12, and the apps run from Android 8; the trust store works the same on every version.
 
 The host carries a list of known signers: the SHA-256 of the certificates its first-party
 clients are signed with (for OpenWatch, OpenVitals' release upload certificate and its Play
@@ -78,7 +70,9 @@ The host keeps, per client package, a record:
 | `signerSha256` | the signing certificate the trust was given to |
 | `state` | `PENDING`, `TRUSTED`, `BLOCKED` |
 | `capabilities` | the granted subset of `profile`, `devices`, `recording`, `live` |
-| `grantedAt` | when the user allowed it |
+| `updatedAt` | when the trust last changed |
+| `lastSeenAt` | when the client last said hello or went away |
+| `profileReceivedAt` | when the host last took a body profile from it |
 
 Rules:
 
@@ -106,6 +100,15 @@ The consent screen names each capability in plain words:
 | `devices` | "See your paired watches and scale, their battery and last sync, and start a sync" |
 | `recording` | "Start and stop a recording on your watch when it records an activity" |
 | `live` | "Receive heart rate, cadence and power from your watch while it records" |
+
+### What the host shows
+
+The host's Connected apps screen tells, per client, whether it is in use now (bound with a
+listener) or when it was last connected, which sessions it holds ("Recording: streaming heart
+rate from Venu 3") and when its profile last arrived. While a live subscription runs the host
+shows a notification naming the client, so a watch's radio is never kept busy unseen. A
+client that stops clears its listener before it unbinds; one that unbinds without doing so
+leaves when the last binding to the service goes.
 
 ## Protocol
 
@@ -139,7 +142,9 @@ oneway interface IOpenLinkListener {
 `OpenLinkHello` carries `protocolVersion`, `appVersion`, and `requestedCapabilities`.
 `OpenLinkState` carries `protocolVersion`, `trust` (`PENDING`, `TRUSTED`, `BLOCKED`),
 `grantedCapabilities`, and `consentIntent` (a `PendingIntent` to the host's consent screen,
-present while pending).
+present while pending). A client sends it from a tap in its visible activity, with
+`ActivityOptions` that lend its foreground to the launch (`OpenLinkClient.openConsent`): from
+Android 14 the system blocks it otherwise, since the host that made it is in the background.
 
 A recording session and a live subscription belong to the client that opened them: their
 events go to it alone, another client cannot stop them, and they end when their owner loses
@@ -203,13 +208,15 @@ This repository holds:
 - `docs/spec.md`, this document.
 - `contract/`: the AIDL files, the parcelables and the constants. Nothing else.
 - `host/`: `OpenLinkHost` (the binder, identity resolution, capability gating, session
-  ownership and listener bookkeeping), `OpenLinkHostCore` (the trust rules, no Android),
+  ownership and listener bookkeeping, with the connected clients and held sessions as
+  flows), `OpenLinkHostCore` (the trust rules, no Android),
   `OpenLinkTrustStore`, and `OpenLinkHostService`, the exported service the host app
   subclasses. The app implements `OpenLinkHostCapabilities`.
 - `client/`: `OpenLinkClient`, which binds, retries with backoff when the host is missing or
   dies, says hello and registers its listener on every connection, replays what the app asked
   for (the profile to push, the sessions and subscriptions it holds), and exposes the state as
-  flows. The state machine is `OpenLinkClientCore`, tested without Android.
+  flows: `HostMissing`, `Unreachable` (installed, but the binding was refused), `Connecting`,
+  `Connected` with the host's decision, and the time a profile last crossed. The state machine is `OpenLinkClientCore`, tested without Android.
 
 No Hilt, no Compose, no Health Connect, no network. The apps take it as a git submodule at
 `openlink/` and a Gradle composite build (`includeBuild("openlink")`), depending on

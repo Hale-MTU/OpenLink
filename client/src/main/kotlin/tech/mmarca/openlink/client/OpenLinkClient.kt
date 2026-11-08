@@ -1,9 +1,11 @@
 package tech.mmarca.openlink.client
 
+import android.app.ActivityOptions
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -58,6 +60,7 @@ class OpenLinkClient(
     val hostProfile: StateFlow<OpenLinkProfile?> = core.hostProfile
     val recordingStates: SharedFlow<OpenLinkRecordingState> = core.recordingStates
     val liveBatches: SharedFlow<OpenLinkLiveBatch> = core.liveBatches
+    val profileExchangedAtMillis: StateFlow<Long> = core.profileExchangedAtMillis
 
     private val listener = object : IOpenLinkListener.Stub() {
         override fun onStateChanged(state: OpenLinkState?) = post { core.events.onStateChanged(state ?: return@post) }
@@ -81,8 +84,8 @@ class OpenLinkClient(
     fun stop() = post {
         started = false
         retryJob?.cancel()
-        unbind()
         core.onStopped()
+        unbind()
     }
 
     /** Re-checks a missing host, for when the user may have just installed it. */
@@ -91,6 +94,23 @@ class OpenLinkClient(
             retryJob?.cancel()
             retryDelayMillis = INITIAL_RETRY_MILLIS
             bind()
+        }
+    }
+
+    /**
+     * Opens the host's consent screen while it waits for the user's answer about this app.
+     * Call it from a tap in a visible activity: from Android 14 a PendingIntent the host made
+     * starts an activity only if the sender, this app, lends its foreground to it. False if
+     * there is no consent screen to open now.
+     */
+    fun openConsent(context: Context): Boolean {
+        val pending = (status.value as? OpenLinkStatus.Connected)?.state?.consentIntent ?: return false
+        return runCatching {
+            pending.send(context, 0, null, null, null, null, foregroundLaunchOptions())
+            true
+        }.getOrElse { error ->
+            Log.w(TAG, "consent screen did not open", error)
+            false
         }
     }
 
@@ -134,7 +154,7 @@ class OpenLinkClient(
             // Not installed, or the permission is missing. Look again later; installing the
             // host does not tell us.
             runCatching { appContext.unbindService(connection) }
-            core.onHostMissing()
+            core.onHostMissing(installed = isHostInstalled())
             scheduleRetry(MISSING_RETRY_MILLIS)
         }
     }
@@ -175,6 +195,16 @@ class OpenLinkClient(
     }
 
     private companion object {
+        @Suppress("DEPRECATION")
+        fun foregroundLaunchOptions(): android.os.Bundle? =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ActivityOptions.makeBasic()
+                    .setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                    .toBundle()
+            } else {
+                null
+            }
+
         const val TAG = "OpenLinkClient"
         const val INITIAL_RETRY_MILLIS = 1_000L
         const val MAX_RETRY_MILLIS = 60_000L

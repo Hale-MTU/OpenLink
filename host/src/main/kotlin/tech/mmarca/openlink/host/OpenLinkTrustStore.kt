@@ -16,6 +16,10 @@ data class OpenLinkClientRecord(
     /** The client's own label, if it has told us one (its app version, for the settings row). */
     val appVersion: String = "",
     val updatedAtMillis: Long = 0L,
+    /** When the client last said hello or went away; 0 if never. */
+    val lastSeenAtMillis: Long = 0L,
+    /** When the client last sent a body profile the host took; 0 if never. */
+    val profileReceivedAtMillis: Long = 0L,
 )
 
 /** Where the records live. The Android side backs it with SharedPreferences; tests with a map. */
@@ -58,6 +62,8 @@ class OpenLinkTrustStore(private val storage: OpenLinkTrustStorage) {
         record.requested.sorted().joinToString(","),
         record.updatedAtMillis.toString(),
         record.appVersion.replace('\t', ' '),
+        record.lastSeenAtMillis.toString(),
+        record.profileReceivedAtMillis.toString(),
     ).joinToString("\t")
 
     private fun decode(packageName: String, value: String): OpenLinkClientRecord? {
@@ -72,6 +78,8 @@ class OpenLinkTrustStore(private val storage: OpenLinkTrustStorage) {
             requested = parts[3].splitSet() intersect OpenLink.ALL_CAPABILITIES,
             updatedAtMillis = parts[4].toLongOrNull() ?: 0L,
             appVersion = parts.getOrNull(5).orEmpty(),
+            lastSeenAtMillis = parts.getOrNull(6)?.toLongOrNull() ?: 0L,
+            profileReceivedAtMillis = parts.getOrNull(7)?.toLongOrNull() ?: 0L,
         )
     }
 

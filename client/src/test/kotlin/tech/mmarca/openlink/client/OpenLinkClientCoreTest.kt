@@ -34,7 +34,7 @@ class OpenLinkClientCoreTest {
         )
         var hostProfile = OpenLinkProfile(birthYear = 1990, updatedAtMillis = 5)
         override fun hello(hello: OpenLinkHello?): OpenLinkState { calls += "hello:${hello?.requestedCapabilities?.sorted()}"; return state }
-        override fun setListener(listener: IOpenLinkListener?) { calls += "listener" }
+        override fun setListener(listener: IOpenLinkListener?) { calls += if (listener == null) "clear" else "listener" }
         override fun setProfile(profile: OpenLinkProfile?) { calls += "setProfile:${profile?.birthYear}" }
         override fun getProfile(): OpenLinkProfile = hostProfile
         override fun getDevices(): MutableList<OpenLinkDevice> = hostDevices
@@ -57,7 +57,8 @@ class OpenLinkClientCoreTest {
 
     private val trusted = OpenLinkState(trust = OpenLinkTrust.TRUSTED, grantedCapabilities = OpenLink.ALL_CAPABILITIES)
     private val pending = OpenLinkState(trust = OpenLinkTrust.PENDING)
-    private val core = OpenLinkClientCore(OpenLink.ALL_CAPABILITIES, "2.17.0")
+    private var now = 100L
+    private val core = OpenLinkClientCore(OpenLink.ALL_CAPABILITIES, "2.17.0", clock = { now })
 
     @Test
     fun `a trusted connection catches up on devices and the host's profile`() {
@@ -138,5 +139,44 @@ class OpenLinkClientCoreTest {
 
         assertThat(core.devices.value).isEmpty()
         assertThat(core.hostProfile.value).isNull()
+    }
+
+    @Test
+    fun `stopping clears the listener first, so the host sees the app go`() {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+
+        core.onStopped()
+
+        assertThat(host.calls.last()).isEqualTo("clear")
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.Stopped)
+    }
+
+    @Test
+    fun `a host that is installed but refuses the binding is unreachable, not missing`() {
+        core.onHostMissing(installed = true)
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.Unreachable)
+
+        core.onStarting()
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.Connecting)
+
+        core.onHostMissing(installed = false)
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.HostMissing)
+    }
+
+    @Test
+    fun `the profile exchange time moves when a profile goes out or comes in`() {
+        val host = FakeHost(pending).apply { hostProfile = OpenLinkProfile.EMPTY }
+        core.onConnected(host, NoListener)
+        core.setProfile(OpenLinkProfile(birthYear = 1985))
+        assertThat(core.profileExchangedAtMillis.value).isEqualTo(0L)
+
+        now = 200L
+        core.events.onStateChanged(trusted)
+        assertThat(core.profileExchangedAtMillis.value).isEqualTo(200L)
+
+        now = 300L
+        core.events.onProfileChanged(OpenLinkProfile(birthYear = 1990, updatedAtMillis = 9))
+        assertThat(core.profileExchangedAtMillis.value).isEqualTo(300L)
     }
 }

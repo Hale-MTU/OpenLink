@@ -26,4 +26,19 @@ class OpenLinkSessionsTest {
         assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "s1")).isEqualTo("a")
         assertThat(sessions.owner(OpenLink.CAPABILITY_LIVE, "s2")).isEqualTo("b")
     }
+
+    @Test
+    fun `the sessions held are published as they come and go`() {
+        sessions.claim(OpenLink.CAPABILITY_RECORDING, "s1", "a")
+        sessions.claim(OpenLink.CAPABILITY_LIVE, "s1", "a")
+        assertThat(sessions.active.value).containsExactly(
+            OpenLinkActiveSession("a", OpenLink.CAPABILITY_RECORDING, "s1"),
+            OpenLinkActiveSession("a", OpenLink.CAPABILITY_LIVE, "s1"),
+        )
+
+        sessions.release(OpenLink.CAPABILITY_RECORDING, "s1", "a")
+        sessions.releaseAll("a", OpenLink.CAPABILITY_LIVE)
+
+        assertThat(sessions.active.value).isEmpty()
+    }
 }
