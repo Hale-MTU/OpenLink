@@ -1,0 +1,22 @@
+[versions]
+agp = "9.4.1"
+kotlin = "2.4.20"
+coroutines = "1.11.0"
+annotation = "1.9.1"
+junit4 = "4.13.2"
+truth = "1.4.5"
+robolectric = "4.16"
+androidx-test-core = "1.7.0"
+
+[libraries]
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "annotation" }
+junit4 = { group = "junit", name = "junit", version.ref = "junit4" }
+truth = { group = "com.google.truth", name = "truth", version.ref = "truth" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidx-test-core" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }

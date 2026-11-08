@@ -1,0 +1,45 @@
+package tech.mmarca.openlink
+
+/** The constants both sides of the channel agree on. See docs/spec.md. */
+object OpenLink {
+    /** The protocol this library speaks. Both sides send theirs in hello and use the lower. */
+    const val PROTOCOL_VERSION: Int = 1
+
+    /** The intent action a host's service answers to; the client also names the host's package. */
+    const val ACTION_HOST: String = "tech.mmarca.openlink.action.HOST"
+
+    /** The permission a host declares is `<its package>` + this suffix. */
+    const val PERMISSION_SUFFIX: String = ".permission.OPENLINK"
+
+    /** The capabilities a client can ask for. Unknown names are ignored by an older host. */
+    const val CAPABILITY_PROFILE: String = "profile"
+    const val CAPABILITY_DEVICES: String = "devices"
+    const val CAPABILITY_RECORDING: String = "recording"
+    const val CAPABILITY_LIVE: String = "live"
+
+    val ALL_CAPABILITIES: Set<String> =
+        setOf(CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE)
+
+    fun permissionFor(hostPackage: String): String = hostPackage + PERMISSION_SUFFIX
+}
+
+/** The trust a host has in a caller. */
+enum class OpenLinkTrust { PENDING, TRUSTED, BLOCKED }
+
+/** Biological sex as the body profile carries it. Null in the profile means not declared. */
+enum class OpenLinkSex { FEMALE, MALE }
+
+enum class OpenLinkDeviceKind { WATCH, BIKE_COMPUTER, SCALE }
+
+enum class OpenLinkIntegration { GARMIN, WEAROS, XIAOMI }
+
+enum class OpenLinkConnection { CONNECTED, DISCONNECTED, UNKNOWN }
+
+/** The states a recording session on a wearable goes through. */
+enum class OpenLinkRecordingPhase { STARTING, RECORDING, STOPPED, FAILED }
+
+/**
+ * The sample types a live subscription can ask for. A host answers the ones its devices
+ * produce and leaves the others out; version 1 hosts produce heart rate and steps.
+ */
+enum class OpenLinkSampleType { HEART_RATE, STEPS, CADENCE, POWER }

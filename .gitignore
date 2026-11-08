@@ -1,0 +1,60 @@
+# Claude / AI
+.claude/
+.cursor/
+.copilot/
+.aider*
+.ai/
+*.claude
+# Gradle
+.gradle/
+.kotlin/
+build/
+**/build/
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+# Local configuration
+local.properties
+*.local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Keystore / signing
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pkcs12
+keystore.properties
+!gradle/wrapper/gradle-wrapper.jar
+
+# Generated
+gen/
+out/
+*.salive
+
+# OS
+.DS_Store
+Thumbs.db
+debug_files/
+# Claude config stays local, but skills are shared with the repo.
+!.claude/
+.claude/*
+!.claude/skills/
+
+# The Gradle homes CI keeps in the workspace (scripts/ci-gradle.sh).
+.gradle-ci/
+.gradle-release/
+*.code-workspace
+__pycache__/
+# Local FHIR corpora for FhirCorpusCheck, too large to commit. Anchored, so the test fixtures named fhir/ stay tracked.
+/fhir/
+testData/
+# Local scratch files (sample CSVs, notes) that never ship
+/local/
