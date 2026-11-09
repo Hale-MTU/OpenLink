@@ -193,4 +193,26 @@ class OpenLinkHostCoreTest {
         assertThat(core.clients.value.map { it.packageName })
             .containsExactly("com.example.new", vitals.packageName)
     }
+
+    @Test
+    fun `an app that waited before its signer was known is trusted on its next hello, a blocked one is not`() {
+        OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = emptySet(), clock = { now }).apply {
+            hello(vitals, all)
+            hello(stranger, all)
+            block(stranger.packageName)
+        }
+        val updated = OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = setOf(firstParty, stranger.signerSha256), clock = { now })
+
+        assertThat(updated.hello(vitals, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
+        assertThat(updated.allows(vitals, OpenLink.CAPABILITY_PROFILE)).isTrue()
+        assertThat(updated.hello(stranger, all).trust).isEqualTo(OpenLinkTrust.BLOCKED)
+    }
+
+    @Test
+    fun `a waiting app whose key was rotated from a newly known signer is trusted on its next hello`() {
+        val rotated = vitals.copy(signerSha256 = "eeff", pastSignersSha256 = setOf("aabbccdd"))
+        OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = emptySet(), clock = { now }).hello(rotated, all)
+
+        assertThat(core().hello(rotated, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
+    }
 }
