@@ -186,11 +186,11 @@ def sidebar(pages: list[Page]) -> str:
         for page in listed:
             lines.append(f"- [[{page.title}|{page.name}]]")
         lines.append("")
-    lines.append("**Project**")
-    for page in pages:
-        if not page.section and page.name != "Home":
-            lines.append(f"- [[{page.title}|{page.name}]]")
-    return "\n".join(lines) + "\n"
+    project = [page for page in pages if not page.section and page.name != "Home"]
+    if project:
+        lines.append("**Project**")
+        lines.extend(f"- [[{page.title}|{page.name}]]" for page in project)
+    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 def build(root: pathlib.Path, repo: str, branch: str, out: pathlib.Path) -> tuple[list[str], list[tuple[str, str]]]:
