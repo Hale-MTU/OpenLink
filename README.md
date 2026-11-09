@@ -42,3 +42,7 @@ JVM) and lint of the three modules.
 OpenLink is free software under the GNU Affero General Public License, version 3 or (at your
 option) any later version (AGPL-3.0-or-later), the same license as OpenVitals and OpenWatch.
 See [LICENSE](LICENSE). An app that includes the library is a work based on it.
+
+## Wiki
+
+The [wiki](https://github.com/Hale-MTU/OpenLink/wiki) mirrors this repository's Markdown on every push to `main` (`.github/workflows/wiki.yml`, `scripts/sync-wiki.py`, the same script as in OpenVitals, OpenWatch and OpenBridge). Edit the files here; the wiki is overwritten. `python3 scripts/sync-wiki.py --repo Hale-MTU/OpenLink --check` fails on a relative link to a file that does not exist, and runs in the verify workflow.

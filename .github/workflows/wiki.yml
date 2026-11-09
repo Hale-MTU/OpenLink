@@ -1,0 +1,60 @@
+# The wiki mirrors the repository's Markdown: README.md is Home, each file
+# under docs/ and the other root Markdown files are one page each, with a
+# sidebar by folder (scripts/sync-wiki.py). It runs on every push to main that
+# touches Markdown, and by hand. The repository is the source: an edit made in
+# the wiki is overwritten by the next run, so the wiki's settings should
+# restrict editing to collaborators.
+#
+# The wiki's git repository exists only once its first page has been saved in
+# the web UI; until then the clone fails and says so.
+name: wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.md"
+      - scripts/sync-wiki.py
+      - .github/workflows/wiki.yml
+  workflow_dispatch:
+
+permissions:
+  # Pushing to the repository's own wiki takes the token's contents write.
+  contents: write
+
+# Runs one at a time, in order: each writes the whole wiki.
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sync:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Clone the wiki
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki; then
+            echo "::error::The wiki has no git repository yet. Open the Wiki tab, save any first page, and run this workflow again."
+            exit 1
+          fi
+      - name: Build the pages
+        run: python3 scripts/sync-wiki.py --repo "$GITHUB_REPOSITORY" --out wiki
+      - name: Push
+        run: |
+          cd wiki
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice::The wiki is already up to date."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Mirror ${GITHUB_SHA::7}: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          git push -q origin HEAD
+          echo "::notice::Wiki updated: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/wiki"
