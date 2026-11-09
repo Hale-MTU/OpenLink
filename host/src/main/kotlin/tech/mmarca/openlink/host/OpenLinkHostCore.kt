@@ -66,6 +66,9 @@ class OpenLinkHostCore(
                 }
             }
             existing.trust == OpenLinkTrust.BLOCKED -> existing.copy(requested = requested, appVersion = hello.appVersion)
+            existing.trust == OpenLinkTrust.PENDING && signer in knownSigners ->
+                // Asked before its signer was known (a host update added it): trusted now, as a first hello would be.
+                existing.copy(trust = OpenLinkTrust.TRUSTED, capabilities = requested, requested = requested, appVersion = hello.appVersion, updatedAtMillis = now)
             existing.trust == OpenLinkTrust.TRUSTED && signer in knownSigners ->
                 // A first-party client gains what it newly asks for; what it stops asking for it keeps
                 // until revoked, so an older build of it does not shrink a newer one's grant.

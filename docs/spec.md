@@ -82,7 +82,8 @@ Rules:
    Allow and Block. The client may also launch the host's consent activity through the
    `PendingIntent` returned in `hello()`.
 2. A client signed by a known signer is recorded `TRUSTED` with every capability it asked for,
-   on its first `hello()`, without a card. It still appears under Settings, Connected apps, and can be revoked there.
+   on its first `hello()`, without a card. One still `PENDING` from before its signer was known
+   (a host update added it) becomes `TRUSTED` on its next `hello()`; a `BLOCKED` one stays. It still appears under Settings, Connected apps, and can be revoked there.
 3. A changed signing certificate on a known package drops the record to `PENDING` and clears
    the capabilities, as the Wear OS link does for a reinstalled phone. The old trust never
    carries over to a new signer.
