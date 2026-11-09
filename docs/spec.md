@@ -52,7 +52,12 @@ reinstalled. A client may keep the `<uses-permission>` for an older host; a host
 
 Trust is the host's decision, made per call from the caller's identity: the host resolves
 `Binder.getCallingUid()` to its one package (a uid shared by several packages is refused) and
-the SHA-256 of its current signing certificate, and looks that pair up in its trust store. A
+the SHA-256 of its current signing certificate, and looks that pair up in its trust store.
+From API 28 the host also reads the certificates the key was rotated from
+(`signingCertificateHistory`, APK signature scheme v3). The platform proves that lineage, so
+trust given to a past certificate carries over to the current one, and the record moves to
+the current one. An app signed by several certificates has no rotation; its identity is all
+of them, as their sorted digests joined by `+`. A
 `signature|knownSigner` permission would do part of this in the platform, but only from
 Android 12, and the apps run from Android 8; the trust store works the same on every version.
 
@@ -85,12 +90,16 @@ Rules:
    on its first `hello()`, without a card. It still appears under Settings, Connected apps, and can be revoked there.
 3. A changed signing certificate on a known package drops the record to `PENDING` and clears
    the capabilities, as the Wear OS link does for a reinstalled phone. The old trust never
-   carries over to a new signer.
+   carries over to a new signer, except to a key rotated from the trusted one (see Identity
+   and permission).
 4. `BLOCKED` is final until the user clears it in Settings. A blocked client's calls return
    `OpenLinkState(BLOCKED)` and nothing else.
 5. Revoking a capability takes effect on the next call and closes any live subscription
    under it immediately.
 6. A capability a client did not ask for in `hello()` is never granted to it.
+7. The host keeps at most 10 `PENDING` records and drops the oldest first. A `PENDING` record
+   not seen for 30 days is dropped. Any app can say hello, so it must not fill the host's
+   screens.
 
 The consent screen names each capability in plain words:
 
@@ -150,6 +159,11 @@ A recording session and a live subscription belong to the client that opened the
 events go to it alone, another client cannot stop them, and they end when their owner loses
 the capability, unbinds or dies.
 
+Limits: a client opens at most one new recording session per 10 seconds; a repeated
+`startRecording` for a session it holds does not count. A refused start reports `FAILED` with
+the reason `rate_limit`. A session ends 6 hours after it was opened, with `STOPPED` and the
+reason `too_long`; the host checks this whenever the session is used.
+
 Every call under a capability the caller lacks is a no-op that logs a count; synchronous ones
 return an empty result. The host never throws across the binder for a permission question,
 so an old client never crashes against a stricter host.
@@ -176,7 +190,7 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
   supports recording).
 - `OpenLinkRecordingState`: `sessionId`, `deviceId`, `phase` (`STARTING`, `RECORDING`,
   `STOPPED`, `FAILED`), `reason` (a code: `no_device`, `not_connected`, `unsupported`,
-  `stopped_by_client`, `host_stopped`), `atMillis`.
+  `stopped_by_client`, `host_stopped`, `rate_limit`, `too_long`), `atMillis`.
 - `OpenLinkLiveSubscription`: `sessionId`, `types` (subset of `HEART_RATE`, `STEPS`,
   `CADENCE`, `POWER`), `deviceId`.
 - `OpenLinkLiveBatch`: `sessionId`, `deviceId`, and samples (`type`, `atMillis`, `value`),

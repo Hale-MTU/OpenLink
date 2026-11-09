@@ -134,4 +134,63 @@ class OpenLinkHostCoreTest {
         assertThat(record.lastSeenAtMillis).isEqualTo(0L)
         assertThat(record.profileReceivedAtMillis).isEqualTo(0L)
     }
+
+    @Test
+    fun `a rotated key keeps the trust given to the key it was rotated from`() {
+        val core = core()
+        core.hello(stranger, all)
+        core.allow(stranger.packageName)
+        val rotated = stranger.copy(signerSha256 = "5678", pastSignersSha256 = setOf("1234"))
+
+        assertThat(core.allows(rotated, OpenLink.CAPABILITY_DEVICES)).isTrue()
+        assertThat(core.hello(rotated, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
+        assertThat(core.clients.value.single().signerSha256).isEqualTo("5678")
+        // Once moved, the old key alone is another app.
+        assertThat(core.allows(stranger, OpenLink.CAPABILITY_DEVICES)).isFalse()
+    }
+
+    @Test
+    fun `a key rotated from a known signer is a known signer`() {
+        val rotated = vitals.copy(signerSha256 = "eeff", pastSignersSha256 = setOf("aabbccdd"))
+
+        assertThat(core().hello(rotated, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
+    }
+
+    @Test
+    fun `a past signer the trust was never given to proves nothing`() {
+        val core = core()
+        core.hello(stranger, all)
+        core.allow(stranger.packageName)
+        val other = stranger.copy(signerSha256 = "9999", pastSignersSha256 = setOf("4321"))
+
+        assertThat(core.allows(other, OpenLink.CAPABILITY_DEVICES)).isFalse()
+        assertThat(core.hello(other, all).trust).isEqualTo(OpenLinkTrust.PENDING)
+    }
+
+    @Test
+    fun `pending records are capped, the oldest dropped first`() {
+        val core = core()
+        repeat(OpenLinkHostCore.MAX_PENDING + 3) { i ->
+            now = 1_000L + i
+            core.hello(OpenLinkCaller(20_000 + i, "com.example.app$i", "ff$i"), all)
+        }
+
+        val pending = core.clients.value.map { it.packageName }
+        assertThat(pending).hasSize(OpenLinkHostCore.MAX_PENDING)
+        assertThat(pending).doesNotContain("com.example.app0")
+        assertThat(pending).contains("com.example.app${OpenLinkHostCore.MAX_PENDING + 2}")
+    }
+
+    @Test
+    fun `a pending record not seen for 30 days is dropped, a trusted one is not`() {
+        val core = core()
+        core.hello(stranger, all)
+        core.hello(vitals, all)
+
+        now += OpenLinkHostCore.PENDING_MAX_AGE_MILLIS + 1
+        core.hello(OpenLinkCaller(20_001, "com.example.new", "ff"), all)
+
+        assertThat(core.clients.value.map { it.packageName })
+            .containsExactly("com.example.new", vitals.packageName)
+    }
 }

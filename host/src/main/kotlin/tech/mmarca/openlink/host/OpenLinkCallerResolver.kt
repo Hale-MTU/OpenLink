@@ -18,27 +18,34 @@ class OpenLinkCallerResolver(context: Context) {
         val packages = packageManager.getPackagesForUid(uid)?.distinct().orEmpty()
         if (packages.size != 1) return null
         val packageName = packages.single()
-        val signer = signerSha256(packageName) ?: return null
-        return OpenLinkCaller(uid, packageName, signer)
+        val signers = signers(packageName) ?: return null
+        return OpenLinkCaller(uid, packageName, signers.current, signers.past)
     }
 
+    private class Signers(val current: String, val past: Set<String>)
+
     @Suppress("DEPRECATION")
-    private fun signerSha256(packageName: String): String? = runCatching {
-        val signatures: Array<Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val info = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
-            val signing = info.signingInfo ?: return null
-            // A rotated key keeps its history; the current signer is the last one.
-            if (signing.hasMultipleSigners()) signing.apkContentsSigners else signing.signingCertificateHistory
-        } else {
-            packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES).signatures
-        } ?: return null
-        val current = if (signatures.size == 1 || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            signatures.firstOrNull()
-        } else {
-            signatures.lastOrNull()
-        } ?: return null
-        sha256Hex(current.toByteArray())
+    private fun signers(packageName: String): Signers? = runCatching {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            // No key rotation before API 28: the signatures are the signer set.
+            val signatures = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES).signatures
+            return signerSet(signatures ?: return null)?.let { Signers(it, emptySet()) }
+        }
+        val info = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        val signing = info.signingInfo ?: return null
+        if (signing.hasMultipleSigners()) {
+            // Several signers cannot rotate; every one of them is part of the identity.
+            return signerSet(signing.apkContentsSigners ?: return null)?.let { Signers(it, emptySet()) }
+        }
+        // One signer with its rotation history, oldest first; the current signer is the last.
+        val history = signing.signingCertificateHistory?.map { sha256Hex(it.toByteArray()) }.orEmpty()
+        val current = history.lastOrNull() ?: return null
+        Signers(current, history.dropLast(1).toSet())
     }.getOrNull()
+
+    /** One certificate as its digest; several as their sorted digests joined by "+", so all must match. */
+    private fun signerSet(signatures: Array<Signature>): String? =
+        signatures.map { sha256Hex(it.toByteArray()) }.sorted().takeIf { it.isNotEmpty() }?.joinToString("+")
 
     companion object {
         fun sha256Hex(bytes: ByteArray): String =
