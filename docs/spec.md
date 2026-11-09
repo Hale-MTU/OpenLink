@@ -82,10 +82,10 @@ The host keeps, per client package, a record:
 Rules:
 
 1. A hello from an unknown package creates a `PENDING` record and returns a state with trust
-   `PENDING` and no capabilities. The host shows a
-   card on its home screen naming the app, its icon and the capabilities it asked for, with
-   Allow and Block. The client may also launch the host's consent activity through the
-   `PendingIntent` returned in `hello()`.
+   `PENDING` and no capabilities. The host lists it on its Connected apps screen with its
+   icon and the capabilities it asked for, with Allow and Block. It raises no card or
+   notification on its own, because any app can say hello. The client launches the host's
+   consent activity through the `PendingIntent` returned in `hello()`, from a tap.
 2. A client signed by a known signer is recorded `TRUSTED` with every capability it asked for,
    on its first `hello()`, without a card. One still `PENDING` from before its signer was known
    (a host update added it) becomes `TRUSTED` on its next `hello()`; a `BLOCKED` one stays. It still appears under Settings, Connected apps, and can be revoked there.
