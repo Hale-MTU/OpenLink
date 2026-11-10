@@ -21,6 +21,7 @@ import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkSample
 import tech.mmarca.openlink.OpenLinkSampleType
+import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
 import tech.mmarca.openlink.OpenLinkTrust
 
@@ -178,5 +179,34 @@ class OpenLinkClientCoreTest {
         now = 300L
         core.events.onProfileChanged(OpenLinkProfile(birthYear = 1990, updatedAtMillis = 9))
         assertThat(core.profileExchangedAtMillis.value).isEqualTo(300L)
+    }
+
+    @Test
+    fun `a host is bound only under a known key or the key the user approved`() {
+        val known = setOf("AA:BB")
+        val official = OpenLinkSigners("aabb")
+        val other = OpenLinkSigners("1234")
+
+        assertThat(hostTrusted(official, known, approved = null)).isTrue()
+        assertThat(hostTrusted(other, known, approved = null)).isFalse()
+        assertThat(hostTrusted(other, known, approved = "1234")).isTrue()
+        // The approval was for that key: the same package under another one asks again.
+        assertThat(hostTrusted(OpenLinkSigners("9999"), known, approved = "1234")).isFalse()
+        // A key rotated from a known or an approved one carries its trust.
+        assertThat(hostTrusted(OpenLinkSigners("eeff", past = setOf("aabb")), known, approved = null)).isTrue()
+        assertThat(hostTrusted(OpenLinkSigners("eeff", past = setOf("1234")), emptySet(), approved = "1234")).isTrue()
+    }
+
+    @Test
+    fun `an untrusted host is reported with its key and holds nothing`() {
+        val core = OpenLinkClientCore(setOf("devices"), "1.0")
+        core.onStarting()
+
+        core.onHostUntrusted("1234")
+
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.HostUntrusted("1234"))
+        assertThat(core.devices.value).isEmpty()
+        core.onStarting()
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.Connecting)
     }
 }

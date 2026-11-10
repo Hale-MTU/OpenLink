@@ -71,6 +71,19 @@ Any app may be a client. One that is not on the list asks the user once, and is 
 under the key it asked with. Nothing in the protocol favours a first-party app beyond that
 skipped prompt.
 
+### The client checks its host too
+
+A client sends its host the body profile and takes readings from it, so it must know who the
+host is; a package name alone proves nothing, since any app may be installed under a free
+name. Before it binds, and again when the binding arrives, `OpenLinkClient` reads the host
+package's signing certificate. It binds only a host signed by one of the certificates the
+client app ships as its first-party host's, or by the certificate the user approved. For any
+other host it reports `HostUntrusted` with the certificate's digest, binds nothing and sends
+nothing; the app asks the user and calls `trustHost(digest)`. The approval is for that
+certificate, so the same package under another one asks again, and a key rotated from a known
+or approved one carries its trust. A third-party host is therefore one question away, as a
+third-party client is.
+
 ## Trust store
 
 The host keeps, per client package, a record:
@@ -241,7 +254,8 @@ This repository holds:
 - `client/`: `OpenLinkClient`, which binds, retries with backoff when the host is missing or
   dies, says hello and registers its listener on every connection, replays what the app asked
   for (the profile to push, the sessions and subscriptions it holds), and exposes the state as
-  flows: `HostMissing`, `Unreachable` (installed, but the binding was refused), `Connecting`,
+  flows: `HostMissing`, `HostUntrusted` (installed under a key neither known nor approved),
+  `Unreachable` (installed, but the binding was refused), `Connecting`,
   `Connected` with the host's decision, and the time a profile last crossed. The state machine is `OpenLinkClientCore`, tested without Android.
 
 No Hilt, no Compose, no Health Connect, no network. The apps take it as a git submodule at
