@@ -39,23 +39,29 @@ interface OpenLinkTrustStorage {
  */
 class OpenLinkTrustStore(private val storage: OpenLinkTrustStorage) {
 
-    @Synchronized
-    fun all(): List<OpenLinkClientRecord> =
-        storage.read().mapNotNull { (key, value) ->
-            if (key.startsWith(KEY_PREFIX)) decode(key.removePrefix(KEY_PREFIX), value) else null
-        }.sortedBy { it.packageName }
+    /**
+     * The records, read once: every gated call and every listener of every broadcast asks
+     * for one, and the storage is only ever written through this store.
+     */
+    private val records: MutableMap<String, OpenLinkClientRecord> = storage.read()
+        .mapNotNull { (key, value) -> if (key.startsWith(KEY_PREFIX)) decode(key.removePrefix(KEY_PREFIX), value) else null }
+        .associateByTo(mutableMapOf()) { it.packageName }
 
     @Synchronized
-    fun get(packageName: String): OpenLinkClientRecord? =
-        storage.read()[KEY_PREFIX + packageName]?.let { decode(packageName, it) }
+    fun all(): List<OpenLinkClientRecord> = records.values.sortedBy { it.packageName }
+
+    @Synchronized
+    fun get(packageName: String): OpenLinkClientRecord? = records[packageName]
 
     @Synchronized
     fun put(record: OpenLinkClientRecord) {
+        records[record.packageName] = record
         storage.write(KEY_PREFIX + record.packageName, encode(record))
     }
 
     @Synchronized
     fun remove(packageName: String) {
+        records.remove(packageName)
         storage.remove(KEY_PREFIX + packageName)
     }
 

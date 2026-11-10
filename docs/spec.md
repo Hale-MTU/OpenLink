@@ -79,7 +79,7 @@ name. Before it binds, and again when the binding arrives, `OpenLinkClient` read
 package's signing certificate. It binds only a host signed by one of the certificates the
 client app ships as its first-party host's, or by the certificate the user approved. For any
 other host it reports `HostUntrusted` with the certificate's digest, binds nothing and sends
-nothing; the app asks the user and calls `trustHost(digest)`. The approval is for that
+nothing (a host whose certificate cannot be read is such a host, with an empty digest); the app asks the user and calls `trustHost(digest)`. The approval is for that
 certificate, so the same package under another one asks again, and a key rotated from a known
 or approved one carries its trust. A third-party host is therefore one question away, as a
 third-party client is.
@@ -115,15 +115,22 @@ Rules:
    the capabilities, as the Wear OS link does for a reinstalled phone. The old trust never
    carries over to a new signer, except to a key rotated from the trusted one (see Identity
    and permission).
-4. `BLOCKED` is final until the user clears it in Settings. A blocked client's calls return
-   `OpenLinkState(BLOCKED)` and nothing else.
+4. `BLOCKED` is final until the user clears it in Settings, whatever signing certificate the
+   package comes back under. A blocked client's calls return `OpenLinkState(BLOCKED)` and
+   nothing else: it registers no listener, so it hears of an unblock at its next `hello()`.
 5. Revoking a capability takes effect on the next call and closes any live subscription
    under it immediately. It stays revoked until the user grants it again, for a first-party
    client too.
 6. A capability a client did not ask for in `hello()` is never granted to it.
 7. The host keeps at most 10 `PENDING` records and drops the oldest first. A `PENDING` record
-   not seen for 30 days is dropped. Any app can say hello, so it must not fill the host's
-   screens.
+   not seen for 30 days is dropped. Both are checked on every `hello()`, whoever says it. Any
+   app can say hello, so it must not fill the host's screens; its version label is cut to 64
+   characters.
+8. A client that is bound says no `hello()` until it rebinds, so its record is never dropped
+   under it: it is not pruned, and forgetting it starts its record over as its first `hello()`
+   left it (`PENDING`, or `TRUSTED` for a first-party client).
+9. A first-party client that comes back under another of its listed certificates (the same
+   app from another channel) is the same client: what the user revoked stays revoked.
 
 The consent screen names each capability in plain words:
 

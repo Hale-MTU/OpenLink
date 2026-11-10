@@ -252,4 +252,105 @@ class OpenLinkHostCoreTest {
         assertThat(core.hello(vitals, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
         assertThat(core.clients.value.single { it.packageName == vitals.packageName }.knownSigner).isTrue()
     }
+
+    @Test
+    fun `a blocked package stays blocked under another key`() {
+        val core = core()
+        core.hello(stranger, all)
+        core.block(stranger.packageName)
+        val other = stranger.copy(signerSha256 = "9999")
+
+        assertThat(core.hello(other, all).trust).isEqualTo(OpenLinkTrust.BLOCKED)
+        assertThat(core.decision(other).trust).isEqualTo(OpenLinkTrust.BLOCKED)
+    }
+
+    @Test
+    fun `a first-party client that comes back under another of its keys keeps what the user decided`() {
+        val twoKeys = mapOf(vitals.packageName to setOf(firstParty, "eeff"))
+        val fromPlay = vitals.copy(signerSha256 = "eeff")
+        val core = core(twoKeys)
+        core.hello(vitals, all)
+        core.revoke(vitals.packageName, OpenLink.CAPABILITY_LIVE)
+
+        val decision = core.hello(fromPlay, all)
+
+        assertThat(decision.trust).isEqualTo(OpenLinkTrust.TRUSTED)
+        assertThat(decision.capabilities).doesNotContain(OpenLink.CAPABILITY_LIVE)
+        assertThat(core.allows(fromPlay, OpenLink.CAPABILITY_PROFILE)).isTrue()
+
+        core.block(vitals.packageName)
+        assertThat(core.hello(vitals, all).trust).isEqualTo(OpenLinkTrust.BLOCKED)
+    }
+
+    @Test
+    fun `a stale pending record goes on any hello, a trusted client's too`() {
+        val core = core()
+        core.hello(stranger, all)
+
+        now += OpenLinkHostCore.PENDING_MAX_AGE_MILLIS + 1
+        core.hello(vitals, all)
+
+        assertThat(core.clients.value.map { it.packageName }).containsExactly(vitals.packageName)
+    }
+
+    @Test
+    fun `a pending client that is bound now is not dropped under it`() {
+        val core = core().apply { isConnected = { it == stranger.packageName } }
+        core.hello(stranger, all)
+
+        now += OpenLinkHostCore.PENDING_MAX_AGE_MILLIS + 1
+        repeat(OpenLinkHostCore.MAX_PENDING + 1) { i -> core.hello(OpenLinkCaller(20_000 + i, "com.example.app$i", "ff$i"), all) }
+
+        core.allow(stranger.packageName)
+        assertThat(core.allows(stranger, OpenLink.CAPABILITY_DEVICES)).isTrue()
+    }
+
+    @Test
+    fun `forgetting a client that is bound now starts it over where it can be allowed again`() {
+        val core = core().apply { isConnected = { true } }
+        core.hello(stranger, all)
+        core.allow(stranger.packageName)
+        core.hello(vitals, all)
+        core.revoke(vitals.packageName, OpenLink.CAPABILITY_LIVE)
+
+        core.forget(stranger.packageName)
+        core.forget(vitals.packageName)
+
+        assertThat(core.decision(stranger).trust).isEqualTo(OpenLinkTrust.PENDING)
+        core.allow(stranger.packageName)
+        assertThat(core.allows(stranger, OpenLink.CAPABILITY_DEVICES)).isTrue()
+        // A first-party client starts over as its first hello would leave it.
+        assertThat(core.allows(vitals, OpenLink.CAPABILITY_LIVE)).isTrue()
+    }
+
+    @Test
+    fun `a trust change is told after the lock is released`() {
+        val core = core()
+        var heldLock = true
+        core.onTrustChanged = { _, _, _ -> heldLock = Thread.holdsLock(core) }
+
+        core.hello(vitals, all)
+
+        assertThat(heldLock).isFalse()
+    }
+
+    @Test
+    fun `only a client that said hello and is not blocked may register a listener`() {
+        val core = core()
+
+        assertThat(core.mayListen(stranger)).isFalse()
+        core.hello(stranger, all)
+        assertThat(core.mayListen(stranger)).isTrue()
+        core.block(stranger.packageName)
+        assertThat(core.mayListen(stranger)).isFalse()
+    }
+
+    @Test
+    fun `an app's version label is cut to a fixed length`() {
+        val core = core()
+
+        core.hello(stranger, OpenLinkHello(appVersion = "x".repeat(10_000)))
+
+        assertThat(core.clients.value.single().appVersion).hasLength(OpenLinkHostCore.MAX_APP_VERSION_LENGTH)
+    }
 }
