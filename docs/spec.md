@@ -160,10 +160,10 @@ A recording session and a live subscription belong to the client that opened the
 events go to it alone, another client cannot stop them, and they end when their owner loses
 the capability, unbinds or dies.
 
-Limits: a client opens at most one new recording session per 10 seconds; a repeated
-`startRecording` for a session it holds does not count. A refused start reports `FAILED` with
-the reason `rate_limit`. A session ends 6 hours after it was opened, with `STOPPED` and the
-reason `too_long`; the host checks this whenever the session is used.
+A session has no time limit and a start no rate limit: only a client the user trusts with
+`recording` can open one, an activity may last a day, and a start that follows a stop at once
+is an ordinary correction. What bounds a session is its owner's binding, and the notification
+the host shows while one runs.
 
 Every call under a capability the caller lacks is a no-op that logs a count; synchronous ones
 return an empty result. The host never throws across the binder for a permission question,
@@ -191,7 +191,7 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
   supports recording).
 - `OpenLinkRecordingState`: `sessionId`, `deviceId`, `phase` (`STARTING`, `RECORDING`,
   `STOPPED`, `FAILED`), `reason` (a code: `no_device`, `not_connected`, `unsupported`,
-  `stopped_by_client`, `host_stopped`, `rate_limit`, `too_long`), `atMillis`.
+  `stopped_by_client`, `host_stopped`), `atMillis`.
 - `OpenLinkLiveSubscription`: `sessionId`, `types` (subset of `HEART_RATE`, `STEPS`,
   `CADENCE`, `POWER`), `deviceId`.
 - `OpenLinkLiveBatch`: `sessionId`, `deviceId`, and samples (`type`, `atMillis`, `value`),

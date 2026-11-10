@@ -105,22 +105,6 @@ class OpenLinkHost(
 
         override fun startRecording(request: OpenLinkRecordingRequest?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
             val sessionId = request?.sessionId?.takeIf { it.isNotBlank() } ?: return@gated
-            endExpiredSessions()
-            if (!sessions.mayStartRecording(sessionId, caller.packageName)) {
-                Log.i(TAG, "refused a recording start: rate limit")
-                broadcastTo(caller.packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ ->
-                    listener.onRecordingStateChanged(
-                        OpenLinkRecordingState(
-                            sessionId,
-                            request.deviceId.orEmpty(),
-                            OpenLinkRecordingPhase.FAILED,
-                            OpenLinkRecordingState.REASON_RATE_LIMIT,
-                            System.currentTimeMillis(),
-                        ),
-                    )
-                }
-                return@gated
-            }
             if (sessions.claim(OpenLink.CAPABILITY_RECORDING, sessionId, caller.packageName)) {
                 capabilities.startRecording(caller, request)
             }
@@ -155,7 +139,6 @@ class OpenLinkHost(
         broadcast(OpenLink.CAPABILITY_DEVICES) { it.onDevicesChanged(devices) }
 
     fun publishRecordingState(state: OpenLinkRecordingState) {
-        endExpiredSessions()
         // The session stays the client's until it stops it or loses the capability: a device
         // that dropped out may come back within the same recording.
         val owner = sessions.owner(OpenLink.CAPABILITY_RECORDING, state.sessionId) ?: return
@@ -164,7 +147,6 @@ class OpenLinkHost(
 
     fun publishLive(batch: OpenLinkLiveBatch) {
         if (batch.samples.isEmpty()) return
-        endExpiredSessions()
         val owner = sessions.owner(OpenLink.CAPABILITY_LIVE, batch.sessionId) ?: return
         broadcastTo(owner, OpenLink.CAPABILITY_LIVE) { listener, _ -> listener.onLiveSamples(batch) }
     }
@@ -234,36 +216,6 @@ class OpenLinkHost(
         grantedCapabilities = decision.capabilities,
         consentIntent = if (decision.trust == OpenLinkTrust.PENDING) consentIntent(packageName) else null,
     )
-
-    /**
-     * Ends the sessions older than [OpenLinkSessions.MAX_SESSION_MILLIS]. Checked whenever a
-     * session is used, so a session that keeps a watch streaming ends within a second of the
-     * limit; one that sends nothing holds nothing.
-     */
-    private fun endExpiredSessions() {
-        for (session in sessions.releaseExpired()) {
-            val caller = OpenLinkCaller(uid = -1, packageName = session.packageName, signerSha256 = "")
-            runCatching {
-                when (session.capability) {
-                    OpenLink.CAPABILITY_RECORDING -> capabilities.stopRecording(caller, session.sessionId)
-                    OpenLink.CAPABILITY_LIVE -> capabilities.unsubscribeLive(caller, session.sessionId)
-                }
-            }.onFailure { Log.w(TAG, "ending an expired session failed", it) }
-            if (session.capability == OpenLink.CAPABILITY_RECORDING) {
-                broadcastTo(session.packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ ->
-                    listener.onRecordingStateChanged(
-                        OpenLinkRecordingState(
-                            session.sessionId,
-                            "",
-                            OpenLinkRecordingPhase.STOPPED,
-                            OpenLinkRecordingState.REASON_TOO_LONG,
-                            System.currentTimeMillis(),
-                        ),
-                    )
-                }
-            }
-        }
-    }
 
     private fun endSessions(packageName: String, capabilitiesLost: Set<String>, reason: String) {
         for (capability in capabilitiesLost) {

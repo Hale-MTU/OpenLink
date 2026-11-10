@@ -82,12 +82,6 @@ data class OpenLinkRecordingState(
         const val REASON_STOPPED_BY_CLIENT = "stopped_by_client"
         const val REASON_HOST_STOPPED = "host_stopped"
 
-        /** The client asked for a new session within the host's interval of its last one. */
-        const val REASON_RATE_LIMIT = "rate_limit"
-
-        /** The session ran longer than a host keeps one. */
-        const val REASON_TOO_LONG = "too_long"
-
         fun fromBundle(bundle: Bundle): OpenLinkRecordingState = OpenLinkRecordingState(
             sessionId = bundle.getString(KEY_SESSION) ?: "",
             deviceId = bundle.getString(KEY_DEVICE) ?: "",
