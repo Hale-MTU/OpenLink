@@ -20,6 +20,10 @@ data class OpenLinkClientRecord(
     val lastSeenAtMillis: Long = 0L,
     /** When the client last sent a body profile the host took; 0 if never. */
     val profileReceivedAtMillis: Long = 0L,
+    /** What the user took back or did not grant; a first-party client does not regain it by asking. */
+    val revoked: Set<String> = emptySet(),
+    /** Whether the last hello came from a first-party client: a known package under its known signer. */
+    val knownSigner: Boolean = false,
 )
 
 /** Where the records live. The Android side backs it with SharedPreferences; tests with a map. */
@@ -35,23 +39,29 @@ interface OpenLinkTrustStorage {
  */
 class OpenLinkTrustStore(private val storage: OpenLinkTrustStorage) {
 
-    @Synchronized
-    fun all(): List<OpenLinkClientRecord> =
-        storage.read().mapNotNull { (key, value) ->
-            if (key.startsWith(KEY_PREFIX)) decode(key.removePrefix(KEY_PREFIX), value) else null
-        }.sortedBy { it.packageName }
+    /**
+     * The records, read once: every gated call and every listener of every broadcast asks
+     * for one, and the storage is only ever written through this store.
+     */
+    private val records: MutableMap<String, OpenLinkClientRecord> = storage.read()
+        .mapNotNull { (key, value) -> if (key.startsWith(KEY_PREFIX)) decode(key.removePrefix(KEY_PREFIX), value) else null }
+        .associateByTo(mutableMapOf()) { it.packageName }
 
     @Synchronized
-    fun get(packageName: String): OpenLinkClientRecord? =
-        storage.read()[KEY_PREFIX + packageName]?.let { decode(packageName, it) }
+    fun all(): List<OpenLinkClientRecord> = records.values.sortedBy { it.packageName }
+
+    @Synchronized
+    fun get(packageName: String): OpenLinkClientRecord? = records[packageName]
 
     @Synchronized
     fun put(record: OpenLinkClientRecord) {
+        records[record.packageName] = record
         storage.write(KEY_PREFIX + record.packageName, encode(record))
     }
 
     @Synchronized
     fun remove(packageName: String) {
+        records.remove(packageName)
         storage.remove(KEY_PREFIX + packageName)
     }
 
@@ -64,6 +74,8 @@ class OpenLinkTrustStore(private val storage: OpenLinkTrustStorage) {
         record.appVersion.replace('\t', ' '),
         record.lastSeenAtMillis.toString(),
         record.profileReceivedAtMillis.toString(),
+        record.revoked.sorted().joinToString(","),
+        if (record.knownSigner) "1" else "0",
     ).joinToString("\t")
 
     private fun decode(packageName: String, value: String): OpenLinkClientRecord? {
@@ -80,6 +92,8 @@ class OpenLinkTrustStore(private val storage: OpenLinkTrustStorage) {
             appVersion = parts.getOrNull(5).orEmpty(),
             lastSeenAtMillis = parts.getOrNull(6)?.toLongOrNull() ?: 0L,
             profileReceivedAtMillis = parts.getOrNull(7)?.toLongOrNull() ?: 0L,
+            revoked = parts.getOrNull(8).orEmpty().splitSet() intersect OpenLink.ALL_CAPABILITIES,
+            knownSigner = parts.getOrNull(9) == "1",
         )
     }
 

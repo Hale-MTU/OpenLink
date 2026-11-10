@@ -21,6 +21,7 @@ import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkSample
 import tech.mmarca.openlink.OpenLinkSampleType
+import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
 import tech.mmarca.openlink.OpenLinkTrust
 
@@ -178,5 +179,66 @@ class OpenLinkClientCoreTest {
         now = 300L
         core.events.onProfileChanged(OpenLinkProfile(birthYear = 1990, updatedAtMillis = 9))
         assertThat(core.profileExchangedAtMillis.value).isEqualTo(300L)
+    }
+
+    @Test
+    fun `a host is bound only under a known key or the key the user approved`() {
+        val known = setOf("AA:BB")
+        val official = OpenLinkSigners("aabb")
+        val other = OpenLinkSigners("1234")
+
+        assertThat(hostTrusted(official, known, approved = null)).isTrue()
+        assertThat(hostTrusted(other, known, approved = null)).isFalse()
+        assertThat(hostTrusted(other, known, approved = "1234")).isTrue()
+        // The approval was for that key: the same package under another one asks again.
+        assertThat(hostTrusted(OpenLinkSigners("9999"), known, approved = "1234")).isFalse()
+        // A key rotated from a known or an approved one carries its trust.
+        assertThat(hostTrusted(OpenLinkSigners("eeff", past = setOf("aabb")), known, approved = null)).isTrue()
+        assertThat(hostTrusted(OpenLinkSigners("eeff", past = setOf("1234")), emptySet(), approved = "1234")).isTrue()
+    }
+
+    @Test
+    fun `an untrusted host is reported with its key and holds nothing`() {
+        val core = OpenLinkClientCore(setOf("devices"), "1.0")
+        core.onStarting()
+
+        core.onHostUntrusted("1234")
+
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.HostUntrusted("1234"))
+        assertThat(core.devices.value).isEmpty()
+        core.onStarting()
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.Connecting)
+    }
+
+    @Test
+    fun `the state the host repeats when the listener registers is not caught up on twice`() {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        host.hostDevices.clear()
+
+        core.events.onStateChanged(trusted)
+        assertThat(core.devices.value).hasSize(1)
+
+        // A real change is applied.
+        core.events.onStateChanged(trusted.copy(grantedCapabilities = setOf(OpenLink.CAPABILITY_PROFILE)))
+        assertThat(core.devices.value).isEmpty()
+    }
+
+    @Test
+    fun `a host that lost its approval is told, and what it still sends is dropped`() = runTest(UnconfinedTestDispatcher()) {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        core.subscribeLive(OpenLinkLiveSubscription("r1", types = setOf(OpenLinkSampleType.HEART_RATE)))
+        val received = mutableListOf<OpenLinkLiveBatch>()
+        val job = launch { core.liveBatches.collect { received += it } }
+
+        core.onHostUntrusted("1234")
+        core.events.onLiveSamples(OpenLinkLiveBatch("r1", "w1", listOf(OpenLinkSample(OpenLinkSampleType.HEART_RATE, 1L, 60.0))))
+        core.events.onStateChanged(trusted)
+
+        assertThat(host.calls).contains("clear")
+        assertThat(received).isEmpty()
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.HostUntrusted("1234"))
+        job.cancel()
     }
 }

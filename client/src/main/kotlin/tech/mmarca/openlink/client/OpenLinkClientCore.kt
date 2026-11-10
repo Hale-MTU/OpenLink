@@ -17,7 +17,16 @@ import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
+
+/**
+ * Whether a client may bind a host signed by [signers]: under one of the keys the app ships
+ * as its first-party host's ([known]), or under the key the user approved ([approved]). A key
+ * rotated from either counts, since the platform proves the lineage.
+ */
+fun hostTrusted(signers: OpenLinkSigners, known: Set<String>, approved: String?): Boolean =
+    signers.carriesAny(known) || (approved != null && signers.carries(approved))
 
 /** Where the client stands with its host. */
 sealed interface OpenLinkStatus {
@@ -32,6 +41,15 @@ sealed interface OpenLinkStatus {
      * service with a permission this app was not granted (installed before the host).
      */
     data object Unreachable : OpenLinkStatus
+
+    /**
+     * The host is installed, but under a key this app does not know and the user has not
+     * approved: [signerSha256] is its current signing certificate. Nothing is bound and
+     * nothing is sent. The app shows the user what it found and, on a yes, calls
+     * `OpenLinkClient.trustHost(signerSha256)`. Empty if the key could not be read: there is
+     * then nothing to approve, and the host stays unbound.
+     */
+    data class HostUntrusted(val signerSha256: String) : OpenLinkStatus
 
     /** Binding, or the host went away and a rebind is pending. */
     data object Connecting : OpenLinkStatus
@@ -84,7 +102,7 @@ class OpenLinkClientCore(
 
     fun onStarting() {
         val now = _status.value
-        if (now == OpenLinkStatus.Stopped || now == OpenLinkStatus.HostMissing || now == OpenLinkStatus.Unreachable) {
+        if (now == OpenLinkStatus.Stopped || now == OpenLinkStatus.HostMissing || now == OpenLinkStatus.Unreachable || now is OpenLinkStatus.HostUntrusted) {
             _status.value = OpenLinkStatus.Connecting
         }
     }
@@ -94,6 +112,16 @@ class OpenLinkClientCore(
         host = null
         _status.value = if (installed) OpenLinkStatus.Unreachable else OpenLinkStatus.HostMissing
         _devices.value = emptyList()
+    }
+
+    /** The host package is there, but its key is neither known nor approved: stay away from it. */
+    fun onHostUntrusted(signerSha256: String) {
+        // A host bound until now (its approval was taken back) is told, as on a stop.
+        runCatching { host?.setListener(null) }
+        host = null
+        _status.value = OpenLinkStatus.HostUntrusted(signerSha256)
+        _devices.value = emptyList()
+        _hostProfile.value = null
     }
 
     fun onStopped() {
@@ -163,6 +191,8 @@ class OpenLinkClientCore(
 
     private fun applyState(state: OpenLinkState) {
         val before = state()
+        // The host repeats the state when the listener registers; nothing to catch up on then.
+        if (state == before) return
         _status.value = OpenLinkStatus.Connected(state)
         val host = host ?: return
         if (state.has(OpenLink.CAPABILITY_DEVICES)) _devices.value = host.devices.orEmpty().real() else _devices.value = emptyList()
@@ -195,7 +225,9 @@ class OpenLinkClientCore(
 
     /** The listener's callbacks, forwarded by the binder side's stub. */
     inner class Events {
-        fun onStateChanged(state: OpenLinkState) = applyState(state)
+        fun onStateChanged(state: OpenLinkState) {
+            if (state() != null) applyState(state)
+        }
 
         fun onProfileChanged(profile: OpenLinkProfile) {
             if (!granted(OpenLink.CAPABILITY_PROFILE)) return
@@ -208,11 +240,12 @@ class OpenLinkClientCore(
         }
 
         fun onRecordingStateChanged(state: OpenLinkRecordingState) {
-            if (state.sessionId in recordings) _recordingStates.tryEmit(state)
+            if (state() != null && state.sessionId in recordings) _recordingStates.tryEmit(state)
         }
 
         fun onLiveSamples(batch: OpenLinkLiveBatch) {
-            if (batch.sessionId in subscriptions) _liveBatches.tryEmit(batch)
+            // Only from the host this client is connected to: one it left may still be calling.
+            if (state() != null && batch.sessionId in subscriptions) _liveBatches.tryEmit(batch)
         }
     }
 }

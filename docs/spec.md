@@ -52,13 +52,37 @@ reinstalled. A client may keep the `<uses-permission>` for an older host; a host
 
 Trust is the host's decision, made per call from the caller's identity: the host resolves
 `Binder.getCallingUid()` to its one package (a uid shared by several packages is refused) and
-the SHA-256 of its current signing certificate, and looks that pair up in its trust store. A
+the SHA-256 of its current signing certificate, and looks that pair up in its trust store.
+From API 28 the host also reads the certificates the key was rotated from
+(`signingCertificateHistory`, APK signature scheme v3). The platform proves that lineage, so
+trust given to a past certificate carries over to the current one, and the record moves to
+the current one. An app signed by several certificates has no rotation; its identity is all
+of them, as their sorted digests joined by `+`. A
 `signature|knownSigner` permission would do part of this in the platform, but only from
 Android 12, and the apps run from Android 8; the trust store works the same on every version.
 
-The host carries a list of known signers: the SHA-256 of the certificates its first-party
-clients are signed with (for OpenWatch, OpenVitals' release upload certificate and its Play
-app-signing certificate). A caller signed by one of them is trusted without a prompt.
+The host carries a list of its first-party clients: each package name with the SHA-256 of
+the certificates that package is signed with (for OpenWatch, `tech.mmarca.openvitals` with
+OpenVitals' release upload certificate and its Play app-signing certificate). A caller with
+one of these names under one of its own certificates is trusted without a prompt. The name
+and the key count together: the same key under another package name asks like any other app.
+
+Any app may be a client. One that is not on the list asks the user once, and is then trusted
+under the key it asked with. Nothing in the protocol favours a first-party app beyond that
+skipped prompt.
+
+### The client checks its host too
+
+A client sends its host the body profile and takes readings from it, so it must know who the
+host is; a package name alone proves nothing, since any app may be installed under a free
+name. Before it binds, and again when the binding arrives, `OpenLinkClient` reads the host
+package's signing certificate. It binds only a host signed by one of the certificates the
+client app ships as its first-party host's, or by the certificate the user approved. For any
+other host it reports `HostUntrusted` with the certificate's digest, binds nothing and sends
+nothing (a host whose certificate cannot be read is such a host, with an empty digest); the app asks the user and calls `trustHost(digest)`. The approval is for that
+certificate, so the same package under another one asks again, and a key rotated from a known
+or approved one carries its trust. A third-party host is therefore one question away, as a
+third-party client is.
 
 ## Trust store
 
@@ -73,25 +97,40 @@ The host keeps, per client package, a record:
 | `updatedAt` | when the trust last changed |
 | `lastSeenAt` | when the client last said hello or went away |
 | `profileReceivedAt` | when the host last took a body profile from it |
+| `revoked` | the capabilities the user took back or did not grant |
+| `knownSigner` | whether its last hello came as a first-party client |
 
 Rules:
 
 1. A hello from an unknown package creates a `PENDING` record and returns a state with trust
-   `PENDING` and no capabilities. The host shows a
-   card on its home screen naming the app, its icon and the capabilities it asked for, with
-   Allow and Block. The client may also launch the host's consent activity through the
-   `PendingIntent` returned in `hello()`.
+   `PENDING` and no capabilities. The host lists it on its Connected apps screen with its
+   icon and the capabilities it asked for, with Allow and Block. It raises no card or
+   notification on its own, because any app can say hello. The client launches the host's
+   consent activity through the `PendingIntent` returned in `hello()`, from a tap.
 2. A client signed by a known signer is recorded `TRUSTED` with every capability it asked for,
    on its first `hello()`, without a card. One still `PENDING` from before its signer was known
-   (a host update added it) becomes `TRUSTED` on its next `hello()`; a `BLOCKED` one stays. It still appears under Settings, Connected apps, and can be revoked there.
+   (a host update added it) becomes `TRUSTED` on its next `hello()`; a `BLOCKED` one stays. It still appears under Settings, Connected apps, and can be revoked there. A later `hello()`
+   gives it what a newer build newly asks for, never what the user took back.
 3. A changed signing certificate on a known package drops the record to `PENDING` and clears
    the capabilities, as the Wear OS link does for a reinstalled phone. The old trust never
-   carries over to a new signer.
-4. `BLOCKED` is final until the user clears it in Settings. A blocked client's calls return
-   `OpenLinkState(BLOCKED)` and nothing else.
+   carries over to a new signer, except to a key rotated from the trusted one (see Identity
+   and permission).
+4. `BLOCKED` is final until the user clears it in Settings, whatever signing certificate the
+   package comes back under. A blocked client's calls return `OpenLinkState(BLOCKED)` and
+   nothing else: it registers no listener, so it hears of an unblock at its next `hello()`.
 5. Revoking a capability takes effect on the next call and closes any live subscription
-   under it immediately.
+   under it immediately. It stays revoked until the user grants it again, for a first-party
+   client too.
 6. A capability a client did not ask for in `hello()` is never granted to it.
+7. The host keeps at most 10 `PENDING` records and drops the oldest first. A `PENDING` record
+   not seen for 30 days is dropped. Both are checked on every `hello()`, whoever says it. Any
+   app can say hello, so it must not fill the host's screens; its version label is cut to 64
+   characters.
+8. A client that is bound says no `hello()` until it rebinds, so its record is never dropped
+   under it: it is not pruned, and forgetting it starts its record over as its first `hello()`
+   left it (`PENDING`, or `TRUSTED` for a first-party client).
+9. A first-party client that comes back under another of its listed certificates (the same
+   app from another channel) is the same client: what the user revoked stays revoked.
 
 The consent screen names each capability in plain words:
 
@@ -151,6 +190,11 @@ A recording session and a live subscription belong to the client that opened the
 events go to it alone, another client cannot stop them, and they end when their owner loses
 the capability, unbinds or dies.
 
+A session has no time limit and a start no rate limit: only a client the user trusts with
+`recording` can open one, an activity may last a day, and a start that follows a stop at once
+is an ordinary correction. What bounds a session is its owner's binding, and the notification
+the host shows while one runs.
+
 Every call under a capability the caller lacks is a no-op that logs a count; synchronous ones
 return an empty result. The host never throws across the binder for a permission question,
 so an old client never crashes against a stricter host.
@@ -207,7 +251,8 @@ calls and name capabilities; they never log a value.
 This repository holds:
 
 - `docs/spec.md`, this document.
-- `contract/`: the AIDL files, the parcelables and the constants. Nothing else.
+- `contract/`: the AIDL files, the parcelables, the constants, and `OpenLinkSigners`, which
+  reads a package's signing certificates for both sides. Nothing else.
 - `host/`: `OpenLinkHost` (the binder, identity resolution, capability gating, session
   ownership and listener bookkeeping, with the connected clients and held sessions as
   flows), `OpenLinkHostCore` (the trust rules, no Android),
@@ -216,7 +261,8 @@ This repository holds:
 - `client/`: `OpenLinkClient`, which binds, retries with backoff when the host is missing or
   dies, says hello and registers its listener on every connection, replays what the app asked
   for (the profile to push, the sessions and subscriptions it holds), and exposes the state as
-  flows: `HostMissing`, `Unreachable` (installed, but the binding was refused), `Connecting`,
+  flows: `HostMissing`, `HostUntrusted` (installed under a key neither known nor approved),
+  `Unreachable` (installed, but the binding was refused), `Connecting`,
   `Connected` with the host's decision, and the time a profile last crossed. The state machine is `OpenLinkClientCore`, tested without Android.
 
 No Hilt, no Compose, no Health Connect, no network. The apps take it as a git submodule at

@@ -7,6 +7,8 @@ import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.update
 import tech.mmarca.openlink.IOpenLinkHost
 import tech.mmarca.openlink.IOpenLinkListener
 import tech.mmarca.openlink.OpenLink
@@ -55,6 +57,7 @@ class OpenLinkHost(
     }
 
     init {
+        core.isConnected = { it in _connected.value }
         core.onTrustChanged = { packageName, _, after ->
             val kept = if (after?.trust == OpenLinkTrust.TRUSTED) after.capabilities else emptySet()
             endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES - kept, OpenLinkRecordingState.REASON_HOST_STOPPED)
@@ -71,6 +74,12 @@ class OpenLinkHost(
 
         override fun setListener(listener: IOpenLinkListener?) {
             val caller = caller() ?: return
+            // A listener is for a client the host knows: one that said hello and is not blocked.
+            // Clearing one is always allowed.
+            if (listener != null && !core.mayListen(caller)) {
+                Log.i(TAG, "refused a listener")
+                return
+            }
             // One listener per client app: a new one replaces the old.
             synchronized(listeners) {
                 val count = listeners.registeredCallbackCount
@@ -82,7 +91,10 @@ class OpenLinkHost(
                 if (listener != null) listeners.register(listener, caller)
             }
             if (listener != null) {
-                _connected.value = _connected.value + caller.packageName
+                _connected.update { it + caller.packageName }
+                // What the user decided between this client's hello and now reached no listener:
+                // tell it where it stands.
+                runCatching { listener.onStateChanged(stateFor(caller)) }
             } else {
                 // A client that stops cleanly clears its listener first: it is gone.
                 left(caller.packageName)
@@ -174,10 +186,7 @@ class OpenLinkHost(
     /** [packageName] went away: nothing keeps running for it, and its "last connected" moves. */
     private fun left(packageName: String) {
         endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED)
-        if (packageName in _connected.value) {
-            _connected.value = _connected.value - packageName
-            core.onDisconnected(packageName)
-        }
+        if (packageName in _connected.getAndUpdate { it - packageName }) core.onDisconnected(packageName)
     }
 
     private fun caller(): OpenLinkCaller? = resolver.resolve(Binder.getCallingUid())
@@ -228,7 +237,9 @@ class OpenLinkHost(
                     }
                 }.onFailure { Log.w(TAG, "ending a session failed", it) }
                 if (capability == OpenLink.CAPABILITY_RECORDING) {
-                    broadcastTo(packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ ->
+                    // To the owner whatever it may still do: it has just lost the capability, and
+                    // must hear that its recording ended.
+                    broadcastTo(packageName) { listener, _ ->
                         listener.onRecordingStateChanged(
                             OpenLinkRecordingState(sessionId, "", OpenLinkRecordingPhase.STOPPED, reason, System.currentTimeMillis()),
                         )

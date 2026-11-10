@@ -26,10 +26,14 @@ import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
 
 /**
- * Binds to an OpenLink host and keeps the binding: a host that dies or is updated is rebound
+ * Binds to an OpenLink host and keeps the binding, once it knows who the host is: the package
+ * must be signed by one of [knownHostSigners], or by a key the user approved through
+ * [trustHost]. A package name alone proves nothing, and the host receives the body profile
+ * and feeds the app readings. Then: a host that dies or is updated is rebound
  * with a backoff, and everything the app asked for is replayed. All host calls run on one
  * serial dispatcher off the main thread; the flows are safe to collect anywhere.
  *
@@ -43,9 +47,15 @@ class OpenLinkClient(
     private val hostPackage: String,
     requestedCapabilities: Set<String>,
     appVersion: String,
+    /**
+     * Hex SHA-256 of the certificates this app's first-party host is signed with; such a host
+     * is bound without asking. Empty: every host needs the user's approval ([trustHost]).
+     */
+    private val knownHostSigners: Set<String> = emptySet(),
 ) {
     private val appContext = context.applicationContext
     private val core = OpenLinkClientCore(requestedCapabilities, appVersion)
+    private val approvals = appContext.getSharedPreferences(APPROVALS_PREFS, Context.MODE_PRIVATE)
     private val serial = Dispatchers.IO.limitedParallelism(1)
     private val scope = CoroutineScope(SupervisorJob() + serial)
 
@@ -89,12 +99,54 @@ class OpenLinkClient(
     }
 
     /** Re-checks a missing host, for when the user may have just installed it. */
-    fun refresh() = post {
+    fun refresh() = post { refreshNow() }
+
+    private fun refreshNow() {
         if (started && !bound) {
             retryJob?.cancel()
             retryDelayMillis = INITIAL_RETRY_MILLIS
             bind()
         }
+    }
+
+    /**
+     * The host's current key if it is installed but neither known nor approved; null if it
+     * may be bound, or is not there at all (the bind then reports it missing). Empty for a
+     * host that is there but whose signers could not be read: that proves nothing, so it is
+     * not bound either.
+     */
+    private fun hostSignerIfUntrusted(): String? {
+        val signers = OpenLinkSigners.of(appContext.packageManager, hostPackage)
+            ?: return if (isHostInstalled()) "" else null
+        return signers.current.takeUnless { hostTrusted(signers, knownHostSigners, approvals.getString(hostPackage, null)) }
+    }
+
+    /** Stays away from an untrusted host and looks again later. True if it was one. */
+    private fun refuseUntrustedHost(): Boolean {
+        val signer = hostSignerIfUntrusted() ?: return false
+        // The core first: it clears the listener on a host that was bound until now.
+        core.onHostUntrusted(signer)
+        unbind()
+        scheduleRetry(MISSING_RETRY_MILLIS)
+        return true
+    }
+
+    /**
+     * The user approved the host signed by [signerSha256], as [OpenLinkStatus.HostUntrusted]
+     * reported it. The approval is for that key: the same package under another key asks again.
+     */
+    fun trustHost(signerSha256: String) = post {
+        if (signerSha256.isBlank()) return@post
+        approvals.edit().putString(hostPackage, OpenLinkSigners.normalize(signerSha256)).apply()
+        // Approved: the question is answered, whatever the bind takes from here.
+        if (started) core.onStarting()
+        refreshNow()
+    }
+
+    /** Takes the user's approval back; a host that needed it is unbound and asks again. */
+    fun forgetHost() = post {
+        approvals.edit().remove(hostPackage).apply()
+        if (started) refuseUntrustedHost()
     }
 
     /**
@@ -127,9 +179,12 @@ class OpenLinkClient(
 
     private fun bind() {
         if (bound) return
+        if (refuseUntrustedHost()) return
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) = post {
                 if (!started || service == null) return@post
+                // Checked again here: the package may have been replaced since the bind was asked for.
+                if (refuseUntrustedHost()) return@post
                 retryDelayMillis = INITIAL_RETRY_MILLIS
                 runCatching { core.onConnected(IOpenLinkHost.Stub.asInterface(service), listener) }
                     .onFailure { Log.w(TAG, "hello failed", it); lost() }
@@ -142,6 +197,7 @@ class OpenLinkClient(
             override fun onNullBinding(name: ComponentName?) = post {
                 unbind()
                 core.onHostMissing()
+                scheduleRetry(MISSING_RETRY_MILLIS)
             }
         }
         val ok = runCatching { appContext.bindService(hostIntent(), connection, Context.BIND_AUTO_CREATE) }
@@ -206,6 +262,7 @@ class OpenLinkClient(
             }
 
         const val TAG = "OpenLinkClient"
+        const val APPROVALS_PREFS = "openlink_host_approvals"
         const val INITIAL_RETRY_MILLIS = 1_000L
         const val MAX_RETRY_MILLIS = 60_000L
         const val MISSING_RETRY_MILLIS = 5 * 60_000L
