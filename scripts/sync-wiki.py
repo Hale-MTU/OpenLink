@@ -51,7 +51,8 @@ NEWEST_FIRST = {"releases"}
 GENERATED = {"_Sidebar.md", "_Footer.md"}
 
 LINK = re.compile(r"(!?)\[([^\]]*)\]\(([^)\s]+)((?:\s+\"[^\"]*\")?)\)")
-REFERENCE = re.compile(r"^(\s*\[[^\]]+\]:\s*)(\S+)(.*)$")
+# A reference definition, "[name]: target". Not a footnote, "[^1]: text".
+REFERENCE = re.compile(r"^(\s*\[(?!\^)[^\]]+\]:\s*)(\S+)(.*)$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 H1 = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 
