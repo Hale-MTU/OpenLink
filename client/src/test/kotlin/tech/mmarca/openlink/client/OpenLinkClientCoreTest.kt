@@ -209,4 +209,36 @@ class OpenLinkClientCoreTest {
         core.onStarting()
         assertThat(core.status.value).isEqualTo(OpenLinkStatus.Connecting)
     }
+
+    @Test
+    fun `the state the host repeats when the listener registers is not caught up on twice`() {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        host.hostDevices.clear()
+
+        core.events.onStateChanged(trusted)
+        assertThat(core.devices.value).hasSize(1)
+
+        // A real change is applied.
+        core.events.onStateChanged(trusted.copy(grantedCapabilities = setOf(OpenLink.CAPABILITY_PROFILE)))
+        assertThat(core.devices.value).isEmpty()
+    }
+
+    @Test
+    fun `a host that lost its approval is told, and what it still sends is dropped`() = runTest(UnconfinedTestDispatcher()) {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        core.subscribeLive(OpenLinkLiveSubscription("r1", types = setOf(OpenLinkSampleType.HEART_RATE)))
+        val received = mutableListOf<OpenLinkLiveBatch>()
+        val job = launch { core.liveBatches.collect { received += it } }
+
+        core.onHostUntrusted("1234")
+        core.events.onLiveSamples(OpenLinkLiveBatch("r1", "w1", listOf(OpenLinkSample(OpenLinkSampleType.HEART_RATE, 1L, 60.0))))
+        core.events.onStateChanged(trusted)
+
+        assertThat(host.calls).contains("clear")
+        assertThat(received).isEmpty()
+        assertThat(core.status.value).isEqualTo(OpenLinkStatus.HostUntrusted("1234"))
+        job.cancel()
+    }
 }

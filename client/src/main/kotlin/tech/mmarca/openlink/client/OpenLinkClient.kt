@@ -111,18 +111,22 @@ class OpenLinkClient(
 
     /**
      * The host's current key if it is installed but neither known nor approved; null if it
-     * may be bound, or is not there at all (the bind then reports it missing).
+     * may be bound, or is not there at all (the bind then reports it missing). Empty for a
+     * host that is there but whose signers could not be read: that proves nothing, so it is
+     * not bound either.
      */
     private fun hostSignerIfUntrusted(): String? {
-        val signers = OpenLinkSigners.of(appContext.packageManager, hostPackage) ?: return null
+        val signers = OpenLinkSigners.of(appContext.packageManager, hostPackage)
+            ?: return if (isHostInstalled()) "" else null
         return signers.current.takeUnless { hostTrusted(signers, knownHostSigners, approvals.getString(hostPackage, null)) }
     }
 
     /** Stays away from an untrusted host and looks again later. True if it was one. */
     private fun refuseUntrustedHost(): Boolean {
         val signer = hostSignerIfUntrusted() ?: return false
-        unbind()
+        // The core first: it clears the listener on a host that was bound until now.
         core.onHostUntrusted(signer)
+        unbind()
         scheduleRetry(MISSING_RETRY_MILLIS)
         return true
     }
@@ -132,17 +136,17 @@ class OpenLinkClient(
      * reported it. The approval is for that key: the same package under another key asks again.
      */
     fun trustHost(signerSha256: String) = post {
+        if (signerSha256.isBlank()) return@post
         approvals.edit().putString(hostPackage, OpenLinkSigners.normalize(signerSha256)).apply()
+        // Approved: the question is answered, whatever the bind takes from here.
+        if (started) core.onStarting()
         refreshNow()
     }
 
     /** Takes the user's approval back; a host that needed it is unbound and asks again. */
     fun forgetHost() = post {
         approvals.edit().remove(hostPackage).apply()
-        if (hostSignerIfUntrusted() != null) {
-            unbind()
-            refreshNow()
-        }
+        if (started) refuseUntrustedHost()
     }
 
     /**
@@ -193,6 +197,7 @@ class OpenLinkClient(
             override fun onNullBinding(name: ComponentName?) = post {
                 unbind()
                 core.onHostMissing()
+                scheduleRetry(MISSING_RETRY_MILLIS)
             }
         }
         val ok = runCatching { appContext.bindService(hostIntent(), connection, Context.BIND_AUTO_CREATE) }
