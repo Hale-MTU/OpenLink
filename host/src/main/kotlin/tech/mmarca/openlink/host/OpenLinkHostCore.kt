@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import tech.mmarca.openlink.OpenLink
 import tech.mmarca.openlink.OpenLinkHello
+import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkTrust
 
 /** Who is calling, as the binder and the package manager say, never as the caller says. */
@@ -30,7 +31,9 @@ data class OpenLinkDecision(
  * The trust rules of docs/spec.md, with no Android in them:
  *
  * - an unknown caller becomes PENDING with what it asked for, and gets nothing;
- * - a caller signed by a known signer is TRUSTED for what it asked for, without a prompt;
+ * - a first-party client (a known package name under one of its known signers) is TRUSTED
+ *   for what it asked for, without a prompt; the same signer under another name is not;
+ * - what the user took back from a client stays taken back until the user gives it again;
  * - a known package with another signer drops back to PENDING, its grants cleared, unless
  *   the platform shows the new key was rotated from the trusted one;
  * - at most [MAX_PENDING] pending records are kept, and one not seen for [PENDING_MAX_AGE_MILLIS]
@@ -44,11 +47,16 @@ data class OpenLinkDecision(
  */
 class OpenLinkHostCore(
     private val store: OpenLinkTrustStore,
-    /** Hex SHA-256 (lowercase, no colons) of first-party signing certificates. */
-    knownSigners: Set<String>,
+    /**
+     * The first-party clients: package name to the hex SHA-256 of the certificates that
+     * package may be signed with. Any other app, and a known signer under another package
+     * name, asks the user.
+     */
+    knownClients: Map<String, Set<String>>,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    private val knownSigners: Set<String> = knownSigners.map(::normalizeSha256).toSet()
+    private val knownClients: Map<String, Set<String>> =
+        knownClients.mapValues { (_, signers) -> signers.map(::normalizeSha256).toSet() }
 
     private val _clients = MutableStateFlow(store.all())
     val clients: StateFlow<List<OpenLinkClientRecord>> = _clients.asStateFlow()
@@ -64,9 +72,10 @@ class OpenLinkHostCore(
         val signer = normalizeSha256(caller.signerSha256)
         val existing = store.get(caller.packageName)?.let { followRotation(it, caller) }
         val now = clock()
+        val known = isKnownSigner(caller)
         val next = when {
             existing == null || existing.signerSha256 != signer -> {
-                if (isKnownSigner(caller)) {
+                if (known) {
                     OpenLinkClientRecord(caller.packageName, signer, OpenLinkTrust.TRUSTED, requested, requested, hello.appVersion, now)
                 } else {
                     // New, or the same name under another key: that is another app until the user says otherwise.
@@ -74,16 +83,16 @@ class OpenLinkHostCore(
                 }
             }
             existing.trust == OpenLinkTrust.BLOCKED -> existing.copy(requested = requested, appVersion = hello.appVersion)
-            existing.trust == OpenLinkTrust.PENDING && isKnownSigner(caller) ->
+            existing.trust == OpenLinkTrust.PENDING && known ->
                 // Asked before its signer was known (a host update added it): trusted now, as a first hello would be.
                 existing.copy(trust = OpenLinkTrust.TRUSTED, capabilities = requested, requested = requested, appVersion = hello.appVersion, updatedAtMillis = now)
-            existing.trust == OpenLinkTrust.TRUSTED && isKnownSigner(caller) ->
-                // A first-party client gains what it newly asks for; what it stops asking for it keeps
-                // until revoked, so an older build of it does not shrink a newer one's grant.
-                existing.copy(capabilities = existing.capabilities + requested, requested = requested, appVersion = hello.appVersion)
+            existing.trust == OpenLinkTrust.TRUSTED && known ->
+                // A first-party client gains what it newly asks for, never what the user took back; what
+                // it stops asking for it keeps until revoked, so an older build does not shrink a newer one's grant.
+                existing.copy(capabilities = existing.capabilities + (requested - existing.revoked), requested = requested, appVersion = hello.appVersion)
             else -> existing.copy(requested = requested, appVersion = hello.appVersion)
         }
-        save(existing, next.copy(lastSeenAtMillis = now))
+        save(existing, next.copy(lastSeenAtMillis = now, knownSigner = known))
         if (next.trust == OpenLinkTrust.PENDING) prunePending(keep = caller.packageName, now = now)
         return decisionFor(next, version)
     }
@@ -108,7 +117,7 @@ class OpenLinkHostCore(
     fun allow(packageName: String, capabilities: Set<String>? = null) {
         val existing = store.get(packageName) ?: return
         val granted = (capabilities ?: existing.requested) intersect existing.requested
-        save(existing, existing.copy(trust = OpenLinkTrust.TRUSTED, capabilities = granted, updatedAtMillis = clock()))
+        save(existing, existing.copy(trust = OpenLinkTrust.TRUSTED, capabilities = granted, revoked = existing.requested - granted, updatedAtMillis = clock()))
     }
 
     @Synchronized
@@ -117,11 +126,11 @@ class OpenLinkHostCore(
         save(existing, existing.copy(trust = OpenLinkTrust.BLOCKED, capabilities = emptySet(), updatedAtMillis = clock()))
     }
 
-    /** Takes one capability back from a trusted client. */
+    /** Takes one capability back from a trusted client. It stays taken back through every later hello, until [grant]. */
     @Synchronized
     fun revoke(packageName: String, capability: String) {
         val existing = store.get(packageName) ?: return
-        save(existing, existing.copy(capabilities = existing.capabilities - capability, updatedAtMillis = clock()))
+        save(existing, existing.copy(capabilities = existing.capabilities - capability, revoked = existing.revoked + capability, updatedAtMillis = clock()))
     }
 
     /** Gives one capability back to a trusted client, if it asked for it. */
@@ -129,7 +138,7 @@ class OpenLinkHostCore(
     fun grant(packageName: String, capability: String) {
         val existing = store.get(packageName) ?: return
         if (existing.trust != OpenLinkTrust.TRUSTED || capability !in existing.requested) return
-        save(existing, existing.copy(capabilities = existing.capabilities + capability, updatedAtMillis = clock()))
+        save(existing, existing.copy(capabilities = existing.capabilities + capability, revoked = existing.revoked - capability, updatedAtMillis = clock()))
     }
 
     /** The client went away (unbound, stopped, or died): its "last connected" time. */
@@ -160,9 +169,12 @@ class OpenLinkHostCore(
         record.signerSha256 == normalizeSha256(caller.signerSha256) ||
             record.signerSha256 in caller.pastSignersSha256.map(::normalizeSha256)
 
-    private fun isKnownSigner(caller: OpenLinkCaller): Boolean =
-        normalizeSha256(caller.signerSha256) in knownSigners ||
-            caller.pastSignersSha256.any { normalizeSha256(it) in knownSigners }
+    /** Known by name and key together: one of the package's own signers, now or before a rotation. */
+    private fun isKnownSigner(caller: OpenLinkCaller): Boolean {
+        val signers = knownClients[caller.packageName] ?: return false
+        return normalizeSha256(caller.signerSha256) in signers ||
+            caller.pastSignersSha256.any { normalizeSha256(it) in signers }
+    }
 
     /** A record for a key the caller was rotated from moves to the current key, trust kept. */
     private fun followRotation(record: OpenLinkClientRecord, caller: OpenLinkCaller): OpenLinkClientRecord {
@@ -207,6 +219,6 @@ class OpenLinkHostCore(
         /** A pending record not seen for 30 days is dropped. */
         const val PENDING_MAX_AGE_MILLIS = 30L * 24 * 60 * 60 * 1000
 
-        fun normalizeSha256(value: String): String = value.replace(":", "").trim().lowercase()
+        fun normalizeSha256(value: String): String = OpenLinkSigners.normalize(value)
     }
 }

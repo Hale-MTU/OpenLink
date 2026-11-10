@@ -18,7 +18,8 @@ class OpenLinkHostCoreTest {
     private val storage = MapStorage()
     private val firstParty = "AA:BB:cc:dd"
     private var now = 1_000L
-    private fun core() = OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = setOf(firstParty), clock = { now })
+    private fun core(known: Map<String, Set<String>> = mapOf("tech.mmarca.openvitals" to setOf(firstParty))) =
+        OpenLinkHostCore(OpenLinkTrustStore(storage), knownClients = known, clock = { now })
 
     private val vitals = OpenLinkCaller(10_001, "tech.mmarca.openvitals", "aabbccdd")
     private val stranger = OpenLinkCaller(10_002, "com.example.other", "1234")
@@ -196,12 +197,12 @@ class OpenLinkHostCoreTest {
 
     @Test
     fun `an app that waited before its signer was known is trusted on its next hello, a blocked one is not`() {
-        OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = emptySet(), clock = { now }).apply {
+        core(known = emptyMap()).apply {
             hello(vitals, all)
             hello(stranger, all)
             block(stranger.packageName)
         }
-        val updated = OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = setOf(firstParty, stranger.signerSha256), clock = { now })
+        val updated = core(known = mapOf(vitals.packageName to setOf(firstParty), stranger.packageName to setOf(stranger.signerSha256)))
 
         assertThat(updated.hello(vitals, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
         assertThat(updated.allows(vitals, OpenLink.CAPABILITY_PROFILE)).isTrue()
@@ -211,8 +212,44 @@ class OpenLinkHostCoreTest {
     @Test
     fun `a waiting app whose key was rotated from a newly known signer is trusted on its next hello`() {
         val rotated = vitals.copy(signerSha256 = "eeff", pastSignersSha256 = setOf("aabbccdd"))
-        OpenLinkHostCore(OpenLinkTrustStore(storage), knownSigners = emptySet(), clock = { now }).hello(rotated, all)
+        core(known = emptyMap()).hello(rotated, all)
 
         assertThat(core().hello(rotated, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
+    }
+
+    @Test
+    fun `what the user took back from a first-party client stays taken back through its next hello`() {
+        val core = core()
+        core.hello(vitals, all)
+
+        core.revoke(vitals.packageName, OpenLink.CAPABILITY_LIVE)
+
+        assertThat(core.hello(vitals, all).capabilities).doesNotContain(OpenLink.CAPABILITY_LIVE)
+        assertThat(core().allows(vitals, OpenLink.CAPABILITY_LIVE)).isFalse()
+
+        core.grant(vitals.packageName, OpenLink.CAPABILITY_LIVE)
+        assertThat(core.hello(vitals, all).capabilities).contains(OpenLink.CAPABILITY_LIVE)
+    }
+
+    @Test
+    fun `a first-party client still gains what a newer build of it newly asks for`() {
+        val core = core()
+        core.hello(vitals, OpenLinkHello(requestedCapabilities = setOf("profile")))
+        core.revoke(vitals.packageName, OpenLink.CAPABILITY_PROFILE)
+
+        val decision = core.hello(vitals, OpenLinkHello(requestedCapabilities = setOf("profile", "devices")))
+
+        assertThat(decision.capabilities).containsExactly("devices")
+    }
+
+    @Test
+    fun `a known signer under another package name is not first-party`() {
+        val core = core()
+        val other = vitals.copy(packageName = "com.example.same.key")
+
+        assertThat(core.hello(other, all).trust).isEqualTo(OpenLinkTrust.PENDING)
+        assertThat(core.clients.value.single().knownSigner).isFalse()
+        assertThat(core.hello(vitals, all).trust).isEqualTo(OpenLinkTrust.TRUSTED)
+        assertThat(core.clients.value.single { it.packageName == vitals.packageName }.knownSigner).isTrue()
     }
 }

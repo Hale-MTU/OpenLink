@@ -61,9 +61,15 @@ of them, as their sorted digests joined by `+`. A
 `signature|knownSigner` permission would do part of this in the platform, but only from
 Android 12, and the apps run from Android 8; the trust store works the same on every version.
 
-The host carries a list of known signers: the SHA-256 of the certificates its first-party
-clients are signed with (for OpenWatch, OpenVitals' release upload certificate and its Play
-app-signing certificate). A caller signed by one of them is trusted without a prompt.
+The host carries a list of its first-party clients: each package name with the SHA-256 of
+the certificates that package is signed with (for OpenWatch, `tech.mmarca.openvitals` with
+OpenVitals' release upload certificate and its Play app-signing certificate). A caller with
+one of these names under one of its own certificates is trusted without a prompt. The name
+and the key count together: the same key under another package name asks like any other app.
+
+Any app may be a client. One that is not on the list asks the user once, and is then trusted
+under the key it asked with. Nothing in the protocol favours a first-party app beyond that
+skipped prompt.
 
 ## Trust store
 
@@ -78,6 +84,8 @@ The host keeps, per client package, a record:
 | `updatedAt` | when the trust last changed |
 | `lastSeenAt` | when the client last said hello or went away |
 | `profileReceivedAt` | when the host last took a body profile from it |
+| `revoked` | the capabilities the user took back or did not grant |
+| `knownSigner` | whether its last hello came as a first-party client |
 
 Rules:
 
@@ -88,7 +96,8 @@ Rules:
    consent activity through the `PendingIntent` returned in `hello()`, from a tap.
 2. A client signed by a known signer is recorded `TRUSTED` with every capability it asked for,
    on its first `hello()`, without a card. One still `PENDING` from before its signer was known
-   (a host update added it) becomes `TRUSTED` on its next `hello()`; a `BLOCKED` one stays. It still appears under Settings, Connected apps, and can be revoked there.
+   (a host update added it) becomes `TRUSTED` on its next `hello()`; a `BLOCKED` one stays. It still appears under Settings, Connected apps, and can be revoked there. A later `hello()`
+   gives it what a newer build newly asks for, never what the user took back.
 3. A changed signing certificate on a known package drops the record to `PENDING` and clears
    the capabilities, as the Wear OS link does for a reinstalled phone. The old trust never
    carries over to a new signer, except to a key rotated from the trusted one (see Identity
@@ -96,7 +105,8 @@ Rules:
 4. `BLOCKED` is final until the user clears it in Settings. A blocked client's calls return
    `OpenLinkState(BLOCKED)` and nothing else.
 5. Revoking a capability takes effect on the next call and closes any live subscription
-   under it immediately.
+   under it immediately. It stays revoked until the user grants it again, for a first-party
+   client too.
 6. A capability a client did not ask for in `hello()` is never granted to it.
 7. The host keeps at most 10 `PENDING` records and drops the oldest first. A `PENDING` record
    not seen for 30 days is dropped. Any app can say hello, so it must not fill the host's
@@ -221,7 +231,8 @@ calls and name capabilities; they never log a value.
 This repository holds:
 
 - `docs/spec.md`, this document.
-- `contract/`: the AIDL files, the parcelables and the constants. Nothing else.
+- `contract/`: the AIDL files, the parcelables, the constants, and `OpenLinkSigners`, which
+  reads a package's signing certificates for both sides. Nothing else.
 - `host/`: `OpenLinkHost` (the binder, identity resolution, capability gating, session
   ownership and listener bookkeeping, with the connected clients and held sessions as
   flows), `OpenLinkHostCore` (the trust rules, no Android),
