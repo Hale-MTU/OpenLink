@@ -21,6 +21,10 @@ data class OpenLinkDevice(
     val supportsRecording: Boolean = false,
     /** The live sample types this device can produce. */
     val liveSampleTypes: Set<OpenLinkSampleType> = emptySet(),
+    /** What the device can do when it records a workout of its own (version 2); empty: it cannot. */
+    val recordingFeatures: Set<OpenLinkRecordingFeature> = emptySet(),
+    /** The Health Connect exercise types the device can record itself (version 2). */
+    val exerciseTypes: Set<Int> = emptySet(),
 ) : Parcelable {
     fun toBundle(): Bundle = Bundle().apply {
         putString(KEY_ID, id)
@@ -35,6 +39,8 @@ data class OpenLinkDevice(
         putBoolean(KEY_SUPPORTS_SYNC, supportsSync)
         putBoolean(KEY_SUPPORTS_RECORDING, supportsRecording)
         putStringArrayList(KEY_LIVE_TYPES, ArrayList(liveSampleTypes.map { it.name }))
+        putStringArrayList(KEY_RECORDING_FEATURES, ArrayList(recordingFeatures.map { it.name }))
+        putIntegerArrayList(KEY_EXERCISE_TYPES, ArrayList(exerciseTypes))
     }
 
     override fun describeContents(): Int = 0
@@ -54,6 +60,8 @@ data class OpenLinkDevice(
         private const val KEY_SUPPORTS_SYNC = "supportsSync"
         private const val KEY_SUPPORTS_RECORDING = "supportsRecording"
         private const val KEY_LIVE_TYPES = "liveSampleTypes"
+        private const val KEY_RECORDING_FEATURES = "recordingFeatures"
+        private const val KEY_EXERCISE_TYPES = "exerciseTypes"
 
         /** Null when the bundle lacks what every device must have: an id, a name, a kind and an integration. */
         fun fromBundleOrNull(bundle: Bundle): OpenLinkDevice? {
@@ -74,6 +82,8 @@ data class OpenLinkDevice(
                 supportsSync = bundle.getBoolean(KEY_SUPPORTS_SYNC, false),
                 supportsRecording = bundle.getBoolean(KEY_SUPPORTS_RECORDING, false),
                 liveSampleTypes = bundle.getEnumSet(KEY_LIVE_TYPES),
+                recordingFeatures = bundle.getEnumSet(KEY_RECORDING_FEATURES),
+                exerciseTypes = bundle.getIntegerArrayList(KEY_EXERCISE_TYPES).orEmpty().toSet(),
             )
         }
 

@@ -18,7 +18,10 @@ import tech.mmarca.openlink.OpenLinkIntegration
 import tech.mmarca.openlink.OpenLinkLiveBatch
 import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
+import tech.mmarca.openlink.OpenLinkRecordingMode
+import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
+import tech.mmarca.openlink.OpenLinkRecordingState
 import tech.mmarca.openlink.OpenLinkSample
 import tech.mmarca.openlink.OpenLinkSampleType
 import tech.mmarca.openlink.OpenLinkSigners
@@ -42,6 +45,8 @@ class OpenLinkClientCoreTest {
         override fun requestSync(deviceId: String?) { calls += "sync:$deviceId" }
         override fun startRecording(request: OpenLinkRecordingRequest?) { calls += "start:${request?.sessionId}" }
         override fun stopRecording(sessionId: String?) { calls += "stop:$sessionId" }
+        override fun pauseRecording(sessionId: String?, atMillis: Long) { calls += "pause:$sessionId@$atMillis" }
+        override fun resumeRecording(sessionId: String?, atMillis: Long) { calls += "resume:$sessionId@$atMillis" }
         override fun subscribeLive(subscription: OpenLinkLiveSubscription?) { calls += "live:${subscription?.sessionId}" }
         override fun unsubscribeLive(sessionId: String?) { calls += "unlive:$sessionId" }
         override fun asBinder(): IBinder? = null
@@ -240,5 +245,79 @@ class OpenLinkClientCoreTest {
         assertThat(received).isEmpty()
         assertThat(core.status.value).isEqualTo(OpenLinkStatus.HostUntrusted("1234"))
         job.cancel()
+    }
+
+    @Test
+    fun `a pause is sent, replayed after a reconnect and cleared by a resume`() {
+        val first = FakeHost(trusted)
+        core.onConnected(first, NoListener)
+        core.startRecording(OpenLinkRecordingRequest("r1", deviceId = "w1", mode = OpenLinkRecordingMode.RECORD))
+        core.pauseRecording("r1", atMillis = 200)
+        core.pauseRecording("nope", atMillis = 201)
+        assertThat(first.calls).containsAtLeast("start:r1", "pause:r1@200")
+        assertThat(first.calls.filter { it.endsWith("@201") }).isEmpty()
+
+        core.onDisconnected()
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls.filter { it == "start:r1" || it.startsWith("pause:") }).containsExactly("start:r1", "pause:r1@200").inOrder()
+
+        core.resumeRecording("r1", atMillis = 300)
+        core.onDisconnected()
+        val third = FakeHost(trusted)
+        core.onConnected(third, NoListener)
+        assertThat(third.calls.filter { it.startsWith("pause:") }).isEmpty()
+    }
+
+    @Test
+    fun `a record session is not sent to a host that speaks version 1`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        val host = FakeHost(trusted.copy(protocolVersion = 1))
+        core.onConnected(host, NoListener)
+
+        core.startRecording(OpenLinkRecordingRequest("r1", deviceId = "w1", mode = OpenLinkRecordingMode.RECORD))
+
+        assertThat(host.calls).doesNotContain("start:r1")
+        assertThat(core.activeRecordings()).isEmpty()
+        assertThat(seen.single().phase).isEqualTo(OpenLinkRecordingPhase.FAILED)
+        assertThat(seen.single().reason).isEqualTo(OpenLinkRecordingState.REASON_UNSUPPORTED)
+        job.cancel()
+    }
+
+    @Test
+    fun `a stream session still works against a host that speaks version 1`() {
+        val host = FakeHost(trusted.copy(protocolVersion = 1))
+        core.onConnected(host, NoListener)
+
+        core.startRecording(OpenLinkRecordingRequest("r1"))
+
+        assertThat(host.calls).contains("start:r1")
+    }
+
+    @Test
+    fun `a pause reads as a recording to a version 1 peer`() {
+        val paused = OpenLinkRecordingState("r1", "w1", OpenLinkRecordingPhase.PAUSED)
+
+        assertThat(paused.forVersion(1).phase).isEqualTo(OpenLinkRecordingPhase.RECORDING)
+        assertThat(paused.forVersion(2).phase).isEqualTo(OpenLinkRecordingPhase.PAUSED)
+    }
+
+    @Test
+    fun `a record session the host ends is not replayed, a stream session is`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(OpenLinkRecordingRequest("rec", deviceId = "w1", mode = OpenLinkRecordingMode.RECORD))
+        core.pauseRecording("rec", atMillis = 200)
+        core.startRecording(OpenLinkRecordingRequest("str"))
+
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_ON_DEVICE))
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("str", "w1", OpenLinkRecordingPhase.FAILED, OpenLinkRecordingState.REASON_NOT_CONNECTED))
+
+        assertThat(core.activeRecordings()).containsExactly("str")
+        core.onDisconnected()
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls).contains("start:str")
+        assertThat(again.calls.filter { it.endsWith(":rec") || it.contains(":rec@") }).isEmpty()
     }
 }

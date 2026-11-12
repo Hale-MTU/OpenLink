@@ -3,7 +3,7 @@ package tech.mmarca.openlink
 /** The constants both sides of the channel agree on. See docs/spec.md. */
 object OpenLink {
     /** The protocol this library speaks. Both sides send theirs in hello and use the lower. */
-    const val PROTOCOL_VERSION: Int = 1
+    const val PROTOCOL_VERSION: Int = 2
 
     /** The intent action a host's service answers to; the client also names the host's package. */
     const val ACTION_HOST: String = "tech.mmarca.openlink.action.HOST"
@@ -35,8 +35,21 @@ enum class OpenLinkIntegration { GARMIN, WEAROS, XIAOMI }
 
 enum class OpenLinkConnection { CONNECTED, DISCONNECTED, UNKNOWN }
 
-/** The states a recording session on a wearable goes through. */
-enum class OpenLinkRecordingPhase { STARTING, RECORDING, STOPPED, FAILED }
+/**
+ * The states a recording session on a wearable goes through. [PAUSED] exists from version 2;
+ * a host never reports it to a client that negotiated version 1, which would read it as a failure.
+ */
+enum class OpenLinkRecordingPhase { STARTING, RECORDING, PAUSED, STOPPED, FAILED }
+
+/**
+ * What a recording session does on the host (version 2). [STREAM] keeps the wearable's live
+ * readings flowing while the client records; [RECORD] has the wearable record the workout and
+ * the host save it to Health Connect, with the client only controlling it.
+ */
+enum class OpenLinkRecordingMode { STREAM, RECORD }
+
+/** What a device can do when it records a workout of its own (version 2). */
+enum class OpenLinkRecordingFeature { GPS, HEART_RATE, PAUSE }
 
 /**
  * The sample types a live subscription can ask for. A host answers the ones its devices

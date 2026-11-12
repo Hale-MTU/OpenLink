@@ -170,6 +170,8 @@ class OpenLinkClient(
     fun requestSync(deviceId: String) = call { core.requestSync(deviceId) }
     fun startRecording(request: OpenLinkRecordingRequest) = call { core.startRecording(request) }
     fun stopRecording(sessionId: String) = call { core.stopRecording(sessionId) }
+    fun pauseRecording(sessionId: String) = call { core.pauseRecording(sessionId) }
+    fun resumeRecording(sessionId: String) = call { core.resumeRecording(sessionId) }
     fun subscribeLive(subscription: OpenLinkLiveSubscription) = call { core.subscribeLive(subscription) }
     fun unsubscribeLive(sessionId: String) = call { core.unsubscribeLive(sessionId) }
 

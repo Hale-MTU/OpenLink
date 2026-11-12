@@ -17,6 +17,7 @@ import tech.mmarca.openlink.OpenLinkHello
 import tech.mmarca.openlink.OpenLinkLiveBatch
 import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
+import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
@@ -35,8 +36,13 @@ class OpenLinkHost(
     private val capabilities: OpenLinkHostCapabilities,
     /** The host's consent screen for a pending client; null if the host has none. */
     private val consentIntent: (packageName: String) -> PendingIntent?,
+    /**
+     * Where recordings a wearable records itself are kept across a restart of the host's
+     * process (it may be the trust store's own storage). Null: in memory only.
+     */
+    sessionStorage: OpenLinkTrustStorage? = null,
 ) {
-    private val sessions = OpenLinkSessions()
+    private val sessions = OpenLinkSessions(sessionStorage)
 
     private val _connected = MutableStateFlow<Set<String>>(emptySet())
 
@@ -117,8 +123,27 @@ class OpenLinkHost(
 
         override fun startRecording(request: OpenLinkRecordingRequest?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
             val sessionId = request?.sessionId?.takeIf { it.isNotBlank() } ?: return@gated
-            if (sessions.claim(OpenLink.CAPABILITY_RECORDING, sessionId, caller.packageName)) {
-                capabilities.startRecording(caller, request)
+            // A session the wearable records itself outlives the app that controls it.
+            val detached = request.mode == OpenLinkRecordingMode.RECORD
+            when (val start = sessions.startRecording(sessionId, caller.packageName, detached)) {
+                OpenLinkStart.Begin -> capabilities.startRecording(caller, request)
+                OpenLinkStart.Refused -> Unit
+                // A replay of a recording that ended while the client was away: tell it, start nothing.
+                is OpenLinkStart.Ended -> broadcastTo(caller.packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ ->
+                    listener.onRecordingStateChanged(start.last.forVersion(core.versionOf(caller.packageName)))
+                }
+            }
+        }
+
+        override fun pauseRecording(sessionId: String?, atMillis: Long) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
+            if (sessionId != null && sessions.controls(sessionId, caller.packageName)) {
+                capabilities.pauseRecording(caller, sessionId, atMillis)
+            }
+        }
+
+        override fun resumeRecording(sessionId: String?, atMillis: Long) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
+            if (sessionId != null && sessions.controls(sessionId, caller.packageName)) {
+                capabilities.resumeRecording(caller, sessionId, atMillis)
             }
         }
 
@@ -153,8 +178,10 @@ class OpenLinkHost(
     fun publishRecordingState(state: OpenLinkRecordingState) {
         // The session stays the client's until it stops it or loses the capability: a device
         // that dropped out may come back within the same recording.
-        val owner = sessions.owner(OpenLink.CAPABILITY_RECORDING, state.sessionId) ?: return
-        broadcastTo(owner, OpenLink.CAPABILITY_RECORDING) { listener, _ -> listener.onRecordingStateChanged(state) }
+        // A detached session the state ends is remembered as ended, in the same step.
+        val owner = sessions.reported(state) ?: return
+        val sent = state.forVersion(core.versionOf(owner))
+        broadcastTo(owner, OpenLink.CAPABILITY_RECORDING) { listener, _ -> listener.onRecordingStateChanged(sent) }
     }
 
     fun publishLive(batch: OpenLinkLiveBatch) {
@@ -185,7 +212,7 @@ class OpenLinkHost(
 
     /** [packageName] went away: nothing keeps running for it, and its "last connected" moves. */
     private fun left(packageName: String) {
-        endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED)
+        endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED, keepDetached = true)
         if (packageName in _connected.getAndUpdate { it - packageName }) core.onDisconnected(packageName)
     }
 
@@ -226,9 +253,9 @@ class OpenLinkHost(
         consentIntent = if (decision.trust == OpenLinkTrust.PENDING) consentIntent(packageName) else null,
     )
 
-    private fun endSessions(packageName: String, capabilitiesLost: Set<String>, reason: String) {
+    private fun endSessions(packageName: String, capabilitiesLost: Set<String>, reason: String, keepDetached: Boolean = false) {
         for (capability in capabilitiesLost) {
-            for (sessionId in sessions.releaseAll(packageName, capability)) {
+            for (sessionId in sessions.releaseAll(packageName, capability, keepDetached)) {
                 val caller = OpenLinkCaller(uid = -1, packageName = packageName, signerSha256 = "")
                 runCatching {
                     when (capability) {

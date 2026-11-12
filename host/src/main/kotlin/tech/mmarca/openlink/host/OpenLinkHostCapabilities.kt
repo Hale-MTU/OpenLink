@@ -24,6 +24,13 @@ interface OpenLinkHostCapabilities {
     fun startRecording(caller: OpenLinkCaller, request: OpenLinkRecordingRequest)
     fun stopRecording(caller: OpenLinkCaller, sessionId: String)
 
+    /**
+     * Version 2. Only for the session's owner. [atMillis] is the client's clock: a request older
+     * than the session's last change is the host app's to ignore, and so is a repeat.
+     */
+    fun pauseRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long)
+    fun resumeRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long)
+
     // live
     fun subscribeLive(caller: OpenLinkCaller, subscription: OpenLinkLiveSubscription)
     fun unsubscribeLive(caller: OpenLinkCaller, sessionId: String)
