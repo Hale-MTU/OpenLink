@@ -121,7 +121,10 @@ class OpenLinkClientCore(
      */
     private val pendingStops = linkedSetOf<String>()
 
-    /** Recorded workouts a host has been sent: losing the capability ends them there. */
+    /**
+     * Recorded workouts a host has been sent whose end the app has not heard, stopped ones
+     * included: losing the capability ends them there.
+     */
     private val begun = mutableSetOf<String>()
 
     /** Recorded workouts the host ended lately, whose fuller end (a later summary) still counts. */
@@ -197,7 +200,6 @@ class OpenLinkClientCore(
 
     fun stopRecording(sessionId: String) {
         controls.remove(sessionId)
-        begun.remove(sessionId)
         val request = recordings.remove(sessionId) ?: return
         if (request.mode == OpenLinkRecordingMode.RECORD) {
             // Its end comes after the stop, with the workout's summary.
@@ -269,11 +271,12 @@ class OpenLinkClientCore(
         if (!state.has(OpenLink.CAPABILITY_RECORDING)) {
             pendingStops.clear()
             for (sessionId in begun.toList()) {
-                val request = recordings.remove(sessionId) ?: continue
+                // One the app stopped already, whose end it missed, ends here too.
+                val request = recordings.remove(sessionId)
                 controls.remove(sessionId)
                 remember(sessionId)
                 _recordingStates.tryEmit(
-                    OpenLinkRecordingState(sessionId, request.deviceId.orEmpty(), OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_HOST_STOPPED, clock()),
+                    OpenLinkRecordingState(sessionId, request?.deviceId.orEmpty(), OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_HOST_STOPPED, clock()),
                 )
             }
             begun.clear()
@@ -363,8 +366,12 @@ class OpenLinkClientCore(
             val over = state.phase == OpenLinkRecordingPhase.STOPPED || state.phase == OpenLinkRecordingPhase.FAILED
             val request = recordings[state.sessionId]
             if (request == null) {
-                // A fuller end of a workout that already ended (its summary, two minutes on).
-                if (over && state.sessionId in ended) _recordingStates.tryEmit(state)
+                // The end of a workout the app stopped, or a fuller end of one that already ended
+                // (its summary, two minutes on).
+                if (over && state.sessionId in ended) {
+                    begun.remove(state.sessionId)
+                    _recordingStates.tryEmit(state)
+                }
                 return
             }
             // A workout the wearable recorded is over once the host says so: replaying its start

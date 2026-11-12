@@ -536,4 +536,38 @@ class OpenLinkClientCoreTest {
 
         assertThat(host.calls.filter { it == "start:rec" }).hasSize(2)
     }
+
+    @Test
+    fun `a stopped workout whose end the app missed ends with the capability, once`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.stopRecording("rec")
+        core.onDisconnected()
+
+        val noRecording = trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_RECORDING)
+        core.onConnected(FakeHost(noRecording), NoListener)
+        core.onDisconnected()
+        core.onConnected(FakeHost(noRecording), NoListener)
+
+        assertThat(seen.map { it.sessionId to it.reason }).containsExactly("rec" to OpenLinkRecordingState.REASON_HOST_STOPPED)
+        job.cancel()
+    }
+
+    @Test
+    fun `a stopped workout whose end arrived is not ended again by a lost capability`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.stopRecording("rec")
+        val end = OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, 10)
+        core.events.onRecordingStateChanged(end)
+
+        core.events.onStateChanged(trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_RECORDING))
+
+        assertThat(seen).containsExactly(end)
+        job.cancel()
+    }
 }

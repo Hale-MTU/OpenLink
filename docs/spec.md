@@ -283,18 +283,25 @@ does not build them again, and hands the host app only what changes a workout:
 - The host holds the state (recording or paused) with the time of its last change, and drops a
   request older than that. Every time is the phone's clock. A pause or resume the host app
   reports from the wearable counts as a change, so a client's older wish that it replays after a
-  reconnect does not undo a press on the watch.
+  reconnect does not undo a press on the watch. A report older than the last change, or one that
+  repeats the state, is no change.
+- The host takes a pause or resume it hands on as done. The host app reports the state the
+  workout is in after each, also when the wearable did not take it, so a request that failed may
+  be made again.
 - Pause and resume are for `RECORD` only; a stream session has no pause.
 - A stop from the owner does not end the session at once: it stays the owner's until the host
   app reports `STOPPED` or `FAILED`, so that end, with the workout's summary, reaches the owner.
   While it is stopping, no pause or resume is handed on. The host app must report an end for every
   stop, also for a device that is gone (`FAILED`, `not_connected`); without one the library takes
-  the workout as stopped by the host (`host_stopped`) after 30 minutes, and an end reported later
-  still reaches the owner.
+  the workout as stopped by the host (`host_stopped`) after 30 minutes and tells the owner, and
+  an end reported later still reaches the owner. A workout the owner stopped is not handed to the
+  host app as stopped again when its owner loses the capability.
 - A recorded workout that ends because its owner lost the capability is remembered as
   `STOPPED`, `host_stopped`, so a start the client replays once it has the capability again does
   not begin a new workout. The client library, too, drops a recorded workout a host had once it
-  hears the capability is gone, and reports it `STOPPED`, `host_stopped`.
+  hears the capability is gone, and reports it `STOPPED`, `host_stopped`; so too one it stopped
+  whose end it has not heard.
+- An ended workout is remembered for its owner: another app may use the same session id.
 - Only the owner may pause, resume or stop it, and it outlives its owner's binding (above).
 
 What the host app enforces, because it knows its devices: one workout per device (a request for

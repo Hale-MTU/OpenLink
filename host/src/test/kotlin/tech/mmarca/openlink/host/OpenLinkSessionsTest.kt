@@ -313,10 +313,18 @@ class OpenLinkSessionsTest {
             sessions.startRecording(workout("w$it"), "a")
             sessions.stopRecording("w$it", "a")
         }
+        assertThat(sessions.nextStopDeadline()).isEqualTo(now + OpenLinkSessions.STOP_TIMEOUT_MILLIS)
         now += OpenLinkSessions.STOP_TIMEOUT_MILLIS - 1
+        assertThat(sessions.expireStops()).isEmpty()
         assertThat(sessions.startRecording(workout("more"), "a")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY))
 
         now += 1
+        // Each owner is told its workout ended.
+        val ends = sessions.expireStops()
+        assertThat(ends.map { it.first to it.second.sessionId })
+            .containsExactlyElementsIn((0 until OpenLinkSessions.MAX_WORKOUTS_PER_APP).map { "a" to "w$it" })
+        assertThat(ends.map { it.second.reason }.toSet()).containsExactly(OpenLinkRecordingState.REASON_HOST_STOPPED)
+        assertThat(sessions.nextStopDeadline()).isNull()
         assertThat(sessions.startRecording(workout("more"), "a")).isEqualTo(OpenLinkStart.Begin)
         assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "w0")).isNull()
 
@@ -335,7 +343,8 @@ class OpenLinkSessionsTest {
         now += OpenLinkSessions.STOP_TIMEOUT_MILLIS
 
         val after = OpenLinkSessions(storage, clock = { now })
-        after.startRecording(workout("other"), "a")
+        assertThat(after.nextStopDeadline()).isEqualTo(now)
+        assertThat(after.expireStops().map { it.first }).containsExactly("a")
         assertThat(after.owner(OpenLink.CAPABILITY_RECORDING, "watch")).isNull()
     }
 
@@ -428,5 +437,51 @@ class OpenLinkSessionsTest {
         sessions.reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 3))
 
         assertThat(storage.writes).isEqualTo(writes)
+    }
+
+    @Test
+    fun `a pause the device did not take can be asked again once the host app says so`() {
+        sessions.startRecording(workout("watch", at = 0), "a")
+        assertThat(sessions.control("watch", "a", pause = true, atMillis = 100)).isTrue()
+        assertThat(sessions.control("watch", "a", pause = true, atMillis = 105)).isFalse() // taken as done
+
+        // The watch was out of reach: the host app reports it still recording.
+        sessions.reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 108))
+
+        assertThat(sessions.control("watch", "a", pause = true, atMillis = 110)).isTrue()
+    }
+
+    @Test
+    fun `another app's workout under an ended one's id keeps its own place in the storage`() {
+        val storage = MapStorage()
+        val sessions = OpenLinkSessions(storage, clock = { now })
+        sessions.startRecording(workout("w"), "a")
+        sessions.reported(stopped("w", at = 1))
+        assertThat(sessions.startRecording(workout("w"), "b")).isEqualTo(OpenLinkStart.Begin)
+
+        // a's ended workout is forgotten as newer ones end.
+        repeat(OpenLinkSessions.MAX_FINISHED) { i ->
+            sessions.startRecording(workout("x$i"), "a")
+            sessions.reported(stopped("x$i", at = 2L + i))
+        }
+
+        val after = OpenLinkSessions(storage, clock = { now })
+        assertThat(after.owner(OpenLink.CAPABILITY_RECORDING, "w")).isEqualTo("b")
+        assertThat(after.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Refused)
+    }
+
+    @Test
+    fun `an ended workout is its owner's, so another app's end under the same id does not replace it`() {
+        val storage = MapStorage()
+        OpenLinkSessions(storage).apply {
+            startRecording(workout("w"), "a")
+            reported(stopped("w", at = 1))
+            startRecording(workout("w"), "b")
+            reported(stopped("w", at = 2))
+        }
+
+        val after = OpenLinkSessions(storage)
+        assertThat(after.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Ended(stopped("w", at = 1)))
+        assertThat(after.startRecording(workout("w"), "b")).isEqualTo(OpenLinkStart.Ended(stopped("w", at = 2)))
     }
 }

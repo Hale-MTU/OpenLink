@@ -56,6 +56,9 @@ class OpenLinkSessions(
 ) {
     private data class Key(val capability: String, val sessionId: String)
 
+    /** An ended workout: its id is the owner's, and another app may use the same one. */
+    private data class Done(val owner: String, val sessionId: String)
+
     /** A recorded workout's state as the clients and the host app have set it. */
     private data class Workout(
         val paused: Boolean = false,
@@ -82,8 +85,8 @@ class OpenLinkSessions(
     /** The recorded workouts held now, by session id. */
     private val workouts = mutableMapOf<String, Workout>()
 
-    /** The last recorded workouts the host ended, oldest first, with their owner and final state. */
-    private val finished = linkedMapOf<String, Pair<String, OpenLinkRecordingState>>()
+    /** The last recorded workouts the host ended, oldest first, with their final state. */
+    private val finished = linkedMapOf<Done, OpenLinkRecordingState>()
 
     private val _active = MutableStateFlow<List<OpenLinkActiveSession>>(emptyList())
 
@@ -111,7 +114,6 @@ class OpenLinkSessions(
     /** A recording start from [packageName]. See [OpenLinkStart]. */
     @Synchronized
     fun startRecording(request: OpenLinkRecordingRequest, packageName: String): OpenLinkStart {
-        expireStops()
         val sessionId = request.sessionId
         if (sessionId.isBlank() || sessionId.length > MAX_SESSION_ID_LENGTH) return OpenLinkStart.Refused
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
@@ -122,7 +124,7 @@ class OpenLinkSessions(
             null -> Unit
             else -> return OpenLinkStart.Refused
         }
-        finished[sessionId]?.takeIf { it.first == packageName }?.let { return OpenLinkStart.Ended(it.second) }
+        finished[Done(packageName, sessionId)]?.let { return OpenLinkStart.Ended(it) }
         if (request.mode == OpenLinkRecordingMode.RECORD) {
             if (request.deviceId.isNullOrBlank()) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_NO_DEVICE)
             val held = workouts.keys.count { owners[Key(OpenLink.CAPABILITY_RECORDING, it)] == packageName }
@@ -190,8 +192,9 @@ class OpenLinkSessions(
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
         val over = state.phase == OpenLinkRecordingPhase.STOPPED || state.phase == OpenLinkRecordingPhase.FAILED
         val owner = owners[key] ?: run {
-            val ended = finished[sessionId]?.first ?: return null
             if (!over) return null
+            // The host app names the session only: the latest that ended under this id.
+            val ended = finished.keys.lastOrNull { it.sessionId == sessionId }?.owner ?: return null
             remember(sessionId, ended, state)
             return ended
         }
@@ -257,19 +260,30 @@ class OpenLinkSessions(
     /**
      * A workout the owner stopped whose end the host app has not reported for [STOP_TIMEOUT_MILLIS]
      * (the watch out of reach, the host app lost it) is taken as ended, so it does not hold one of
-     * the owner's places for ever. The real end, if it comes later, still reaches the owner.
+     * the owner's places for ever. Returns each such end with the owner to tell. The real end, if
+     * it comes later, still reaches the owner. The host runs this at [nextStopDeadline] and before
+     * a start.
      */
-    private fun expireStops() {
+    @Synchronized
+    fun expireStops(): List<Pair<String, OpenLinkRecordingState>> {
         val now = clock()
         val expired = workouts.filter { (_, w) -> w.stopping && now - w.stoppedAtMillis >= STOP_TIMEOUT_MILLIS }.keys.toList()
-        for (sessionId in expired) {
+        val ends = expired.mapNotNull { sessionId ->
             val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
-            val owner = owners[key] ?: continue
+            val owner = owners[key] ?: return@mapNotNull null
             drop(key)
-            remember(sessionId, owner, hostStopped(sessionId))
+            val end = hostStopped(sessionId)
+            remember(sessionId, owner, end)
+            owner to end
         }
         if (expired.isNotEmpty()) publish()
+        return ends
     }
+
+    /** When the next stopped workout's end is due on this host's clock, or null if none waits. */
+    @Synchronized
+    fun nextStopDeadline(): Long? =
+        workouts.values.filter { it.stopping }.minOfOrNull { it.stoppedAtMillis + STOP_TIMEOUT_MILLIS }
 
     private fun hostStopped(sessionId: String) =
         OpenLinkRecordingState(sessionId, "", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_HOST_STOPPED, clock())
@@ -296,9 +310,10 @@ class OpenLinkSessions(
     }
 
     private fun remember(sessionId: String, owner: String, last: OpenLinkRecordingState) {
-        finished.remove(sessionId)
-        finished[sessionId] = owner to last
-        storage?.write(storageKey(sessionId), encodeFinished(owner, last))
+        val done = Done(owner, sessionId)
+        finished.remove(done)
+        finished[done] = last
+        storage?.write(endedKey(done), encodeFinished(owner, last))
         trimFinished()
     }
 
@@ -306,25 +321,32 @@ class OpenLinkSessions(
         while (finished.size > MAX_FINISHED) {
             val eldest = finished.keys.first()
             finished.remove(eldest)
-            storage?.remove(storageKey(eldest))
+            storage?.remove(endedKey(eldest))
         }
     }
 
     private fun load() {
-        val stored = storage?.read().orEmpty().filterKeys { it.startsWith(KEY_PREFIX) }
-        val ended = mutableListOf<Triple<String, String, OpenLinkRecordingState>>()
+        val stored = storage?.read().orEmpty()
+        val ended = mutableListOf<Pair<Done, OpenLinkRecordingState>>()
         for ((storedKey, value) in stored) {
-            val sessionId = storedKey.removePrefix(KEY_PREFIX)
-            val fields = value.split('\t', limit = if (value.startsWith(ACTIVE)) 7 else 6)
-            val kept = when (fields[0]) {
-                ACTIVE -> loadWorkout(sessionId, fields)
-                FINISHED -> decodeFinished(sessionId, fields)?.let { ended += Triple(sessionId, fields[1], it) } != null
-                else -> false
+            val kept = when {
+                storedKey.startsWith(KEY_PREFIX) ->
+                    value.startsWith(ACTIVE) && loadWorkout(storedKey.removePrefix(KEY_PREFIX), value.split('\t', limit = 7))
+                storedKey.startsWith(ENDED_PREFIX) -> {
+                    // The owner, a package name, holds no "/": the session id is all after the first.
+                    val rest = storedKey.removePrefix(ENDED_PREFIX)
+                    val sessionId = rest.substringAfter('/', "")
+                    val fields = value.split('\t', limit = 6)
+                    val last = if (fields[0] == FINISHED && sessionId.isNotEmpty()) decodeFinished(sessionId, fields) else null
+                    if (last != null && rest == fields[1] + "/" + sessionId) ended += Done(fields[1], sessionId) to last
+                    last != null
+                }
+                else -> continue
             }
             // Written by a newer or broken build: not ours to keep.
             if (!kept) storage?.remove(storedKey)
         }
-        ended.sortedBy { it.third.atMillis }.forEach { (sessionId, owner, last) -> finished[sessionId] = owner to last }
+        ended.sortedBy { it.second.atMillis }.forEach { (done, last) -> finished[done] = last }
         trimFinished()
     }
 
@@ -362,13 +384,19 @@ class OpenLinkSessions(
         /** The longest session id the host takes: the client chooses it, and it is stored. */
         const val MAX_SESSION_ID_LENGTH = 128
 
-        /** Keys in the storage; the trust store's start with "client.", so both may share one. */
+        /**
+         * Keys in the storage of the workouts held now, by session id, and of ended ones, by owner
+         * and session id; the trust store's start with "client.", so both may share one.
+         */
         const val KEY_PREFIX = "session."
+        const val ENDED_PREFIX = "ended."
 
         private const val ACTIVE = "R"
         private const val FINISHED = "F"
 
         private fun storageKey(sessionId: String) = KEY_PREFIX + sessionId
+
+        private fun endedKey(done: Done) = ENDED_PREFIX + done.owner + "/" + done.sessionId
 
         private fun flag(value: Boolean) = if (value) "1" else "0"
 
