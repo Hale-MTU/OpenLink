@@ -12,12 +12,12 @@ import kotlinx.coroutines.flow.update
 import tech.mmarca.openlink.IOpenLinkHost
 import tech.mmarca.openlink.IOpenLinkListener
 import tech.mmarca.openlink.OpenLink
+import tech.mmarca.openlink.OpenLinkDataWritten
 import tech.mmarca.openlink.OpenLinkDevice
 import tech.mmarca.openlink.OpenLinkHello
 import tech.mmarca.openlink.OpenLinkLiveBatch
 import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
-import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
@@ -122,33 +122,35 @@ class OpenLinkHost(
             gated(OpenLink.CAPABILITY_DEVICES) { capabilities.requestSync(it, deviceId ?: return@gated) }
 
         override fun startRecording(request: OpenLinkRecordingRequest?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
-            val sessionId = request?.sessionId?.takeIf { it.isNotBlank() } ?: return@gated
-            // A session the wearable records itself outlives the app that controls it.
-            val detached = request.mode == OpenLinkRecordingMode.RECORD
-            when (val start = sessions.startRecording(sessionId, caller.packageName, detached)) {
+            request ?: return@gated
+            when (val start = sessions.startRecording(request, caller.packageName)) {
                 OpenLinkStart.Begin -> capabilities.startRecording(caller, request)
                 OpenLinkStart.Refused -> Unit
-                // A replay of a recording that ended while the client was away: tell it, start nothing.
-                is OpenLinkStart.Ended -> broadcastTo(caller.packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ ->
-                    listener.onRecordingStateChanged(start.last.forVersion(core.versionOf(caller.packageName)))
-                }
+                // A replay after a reconnect: where the workout stands, if the host app said.
+                is OpenLinkStart.Already -> start.last?.let { tellRecording(caller.packageName, it) }
+                // A replay of a recording that ended while the client was away: start nothing.
+                is OpenLinkStart.Ended -> tellRecording(caller.packageName, start.last)
+                is OpenLinkStart.Failed -> tellRecording(
+                    caller.packageName,
+                    OpenLinkRecordingState(request.sessionId, request.deviceId.orEmpty(), OpenLinkRecordingPhase.FAILED, start.reason, System.currentTimeMillis()),
+                )
             }
         }
 
         override fun pauseRecording(sessionId: String?, atMillis: Long) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
-            if (sessionId != null && sessions.controls(sessionId, caller.packageName)) {
+            if (sessionId != null && sessions.control(sessionId, caller.packageName, pause = true, atMillis = atMillis)) {
                 capabilities.pauseRecording(caller, sessionId, atMillis)
             }
         }
 
         override fun resumeRecording(sessionId: String?, atMillis: Long) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
-            if (sessionId != null && sessions.controls(sessionId, caller.packageName)) {
+            if (sessionId != null && sessions.control(sessionId, caller.packageName, pause = false, atMillis = atMillis)) {
                 capabilities.resumeRecording(caller, sessionId, atMillis)
             }
         }
 
         override fun stopRecording(sessionId: String?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
-            if (sessionId != null && sessions.release(OpenLink.CAPABILITY_RECORDING, sessionId, caller.packageName)) {
+            if (sessionId != null && sessions.stopRecording(sessionId, caller.packageName)) {
                 capabilities.stopRecording(caller, sessionId)
             }
         }
@@ -178,16 +180,33 @@ class OpenLinkHost(
     fun publishRecordingState(state: OpenLinkRecordingState) {
         // The session stays the client's until it stops it or loses the capability: a device
         // that dropped out may come back within the same recording.
-        // A detached session the state ends is remembered as ended, in the same step.
+        // A recorded workout's state is taken over, and its end remembered, in the same step.
         val owner = sessions.reported(state) ?: return
-        val sent = state.forVersion(core.versionOf(owner))
-        broadcastTo(owner, OpenLink.CAPABILITY_RECORDING) { listener, _ -> listener.onRecordingStateChanged(sent) }
+        tellRecording(owner, state)
+    }
+
+    /**
+     * The host wrote new data to Health Connect (version 2). To every client trusted with
+     * devices that speaks version 2; an older one has no such method.
+     */
+    fun publishDataWritten(written: OpenLinkDataWritten) {
+        if (written.recordTypes.isEmpty()) return
+        forEachListener { listener, caller ->
+            if (core.versionOf(caller.packageName) >= 2 && core.allows(caller, OpenLink.CAPABILITY_DEVICES)) {
+                listener.onDataWritten(written)
+            }
+        }
     }
 
     fun publishLive(batch: OpenLinkLiveBatch) {
         if (batch.samples.isEmpty()) return
         val owner = sessions.owner(OpenLink.CAPABILITY_LIVE, batch.sessionId) ?: return
         broadcastTo(owner, OpenLink.CAPABILITY_LIVE) { listener, _ -> listener.onLiveSamples(batch) }
+    }
+
+    private fun tellRecording(packageName: String, state: OpenLinkRecordingState) {
+        val sent = state.forVersion(core.versionOf(packageName))
+        broadcastTo(packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ -> listener.onRecordingStateChanged(sent) }
     }
 
     /** Whether any client is bound with a listener. */

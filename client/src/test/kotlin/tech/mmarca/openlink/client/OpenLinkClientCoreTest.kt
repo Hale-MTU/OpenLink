@@ -44,7 +44,11 @@ class OpenLinkClientCoreTest {
         override fun getDevices(): MutableList<OpenLinkDevice> = hostDevices
         override fun requestSync(deviceId: String?) { calls += "sync:$deviceId" }
         override fun startRecording(request: OpenLinkRecordingRequest?) { calls += "start:${request?.sessionId}" }
-        override fun stopRecording(sessionId: String?) { calls += "stop:$sessionId" }
+        var dies = false
+        override fun stopRecording(sessionId: String?) {
+            if (dies) throw android.os.DeadObjectException()
+            calls += "stop:$sessionId"
+        }
         override fun pauseRecording(sessionId: String?, atMillis: Long) { calls += "pause:$sessionId@$atMillis" }
         override fun resumeRecording(sessionId: String?, atMillis: Long) { calls += "resume:$sessionId@$atMillis" }
         override fun subscribeLive(subscription: OpenLinkLiveSubscription?) { calls += "live:${subscription?.sessionId}" }
@@ -58,6 +62,7 @@ class OpenLinkClientCoreTest {
         override fun onDevicesChanged(devices: MutableList<OpenLinkDevice>?) = Unit
         override fun onRecordingStateChanged(state: tech.mmarca.openlink.OpenLinkRecordingState?) = Unit
         override fun onLiveSamples(batch: OpenLinkLiveBatch?) = Unit
+        override fun onDataWritten(written: tech.mmarca.openlink.OpenLinkDataWritten?) = Unit
         override fun asBinder(): IBinder? = null
     }
 
@@ -319,5 +324,171 @@ class OpenLinkClientCoreTest {
         core.onConnected(again, NoListener)
         assertThat(again.calls).contains("start:str")
         assertThat(again.calls.filter { it.endsWith(":rec") || it.contains(":rec@") }).isEmpty()
+    }
+
+    private val record = OpenLinkRecordingRequest("rec", deviceId = "w1", mode = OpenLinkRecordingMode.RECORD)
+
+    @Test
+    fun `a stop of a recorded workout while disconnected is sent on the reconnect`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.onDisconnected()
+
+        core.stopRecording("rec")
+
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls).contains("stop:rec")
+        assertThat(again.calls).doesNotContain("start:rec")
+        // Sent once.
+        core.onDisconnected()
+        val third = FakeHost(trusted)
+        core.onConnected(third, NoListener)
+        assertThat(third.calls).doesNotContain("stop:rec")
+    }
+
+    @Test
+    fun `a stop of a stream session while disconnected is not owed, the unbind ended it`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(OpenLinkRecordingRequest("str"))
+        core.onDisconnected()
+        core.stopRecording("str")
+
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls.filter { it.endsWith(":str") }).isEmpty()
+    }
+
+    @Test
+    fun `a resume while disconnected is sent on the reconnect, with its time`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.pauseRecording("rec", atMillis = 200)
+        core.onDisconnected()
+
+        core.resumeRecording("rec", atMillis = 300)
+
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls.filter { it == "start:rec" || it.startsWith("pause:") || it.startsWith("resume:") })
+            .containsExactly("start:rec", "resume:rec@300").inOrder()
+    }
+
+    @Test
+    fun `losing the recording capability drops the stops owed`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.onDisconnected()
+        core.stopRecording("rec")
+
+        val noRecording = trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_RECORDING)
+        core.onConnected(FakeHost(noRecording), NoListener)
+        core.onDisconnected()
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls).doesNotContain("stop:rec")
+    }
+
+    @Test
+    fun `a fuller end of an ended workout still reaches the app, other sessions do not`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        val first = OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, 10)
+        val fuller = first.copy(summary = tech.mmarca.openlink.OpenLinkWorkoutSummary(heartRateRecovery1MinBpm = 31), atMillis = 130)
+
+        core.events.onRecordingStateChanged(first)
+        core.events.onRecordingStateChanged(fuller)
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.RECORDING))
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("other", "w1", OpenLinkRecordingPhase.STOPPED))
+
+        assertThat(seen).containsExactly(first, fuller).inOrder()
+        job.cancel()
+    }
+
+    @Test
+    fun `data written reaches the app only under devices`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<tech.mmarca.openlink.OpenLinkDataWritten>()
+        val job = launch { core.dataWritten.collect { seen += it } }
+        val written = tech.mmarca.openlink.OpenLinkDataWritten(setOf("HeartRate"), 1, 2)
+        core.onConnected(FakeHost(trusted.copy(grantedCapabilities = setOf(OpenLink.CAPABILITY_PROFILE))), NoListener)
+        core.events.onDataWritten(written)
+        assertThat(seen).isEmpty()
+
+        core.events.onStateChanged(trusted)
+        core.events.onDataWritten(written)
+        assertThat(seen).containsExactly(written)
+        job.cancel()
+    }
+
+    @Test
+    fun `the end of a workout the app stopped still reaches it, with its summary`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+
+        core.stopRecording("rec")
+        val end = OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, 10,
+            tech.mmarca.openlink.OpenLinkWorkoutSummary(trimp = 12.0))
+        core.events.onRecordingStateChanged(end)
+
+        assertThat(seen).containsExactly(end)
+        job.cancel()
+    }
+
+    @Test
+    fun `a newer state from the host replaces the app's wish, so an old pause is not sent again`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.pauseRecording("rec", atMillis = 1)
+        // Resumed on the watch at 2.
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.RECORDING, atMillis = 2))
+        core.onDisconnected()
+
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls.filter { it.startsWith("pause:") || it.startsWith("resume:") }).isEmpty()
+    }
+
+    @Test
+    fun `a wish newer than the host's last state is still sent again`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.RECORDING, atMillis = 2))
+        core.onDisconnected()
+        core.pauseRecording("rec", atMillis = 3)
+
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls).contains("pause:rec@3")
+    }
+
+    @Test
+    fun `a stream session has no pause`() {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        core.startRecording(OpenLinkRecordingRequest("str"))
+
+        core.pauseRecording("str", atMillis = 1)
+        core.resumeRecording("str", atMillis = 2)
+
+        assertThat(host.calls.filter { it.startsWith("pause:") || it.startsWith("resume:") }).isEmpty()
+    }
+
+    @Test
+    fun `a stop the dying host did not take is sent to the next one`() {
+        val dying = FakeHost(trusted)
+        core.onConnected(dying, NoListener)
+        core.startRecording(record)
+        dying.dies = true
+
+        runCatching { core.stopRecording("rec") }
+        core.onDisconnected()
+
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls).contains("stop:rec")
     }
 }

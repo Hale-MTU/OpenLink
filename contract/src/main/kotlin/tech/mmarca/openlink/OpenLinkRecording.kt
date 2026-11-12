@@ -54,13 +54,59 @@ data class OpenLinkRecordingRequest(
     }
 }
 
-/** Where a recording session stands on one device. [reason] is a code, never a message. */
+/**
+ * What a recorded workout gives beyond its Health Connect session (version 2): only figures
+ * Health Connect has no type for. Pauses go to Health Connect as pause segments, and splits as
+ * laps, so they are not here. Every field is optional: a device fills what it measured.
+ */
+data class OpenLinkWorkoutSummary(
+    /** Seconds spent in each heart-rate zone, zone 1 first. */
+    val zoneSeconds: List<Int> = emptyList(),
+    /** The lowest heart rate of each zone, zone 1 first, as the host counted them. */
+    val zoneLowerBoundsBpm: List<Int> = emptyList(),
+    /** Banister's training impulse over the workout. */
+    val trimp: Double? = null,
+    /** How far the heart rate fell in the first and second minute after the stop. */
+    val heartRateRecovery1MinBpm: Int? = null,
+    val heartRateRecovery2MinBpm: Int? = null,
+) {
+    fun toBundle(): Bundle = Bundle().apply {
+        putIntegerArrayList(KEY_ZONE_SECONDS, ArrayList(zoneSeconds))
+        putIntegerArrayList(KEY_ZONE_BOUNDS, ArrayList(zoneLowerBoundsBpm))
+        putNullableDouble(KEY_TRIMP, trimp)
+        putNullableInt(KEY_HRR_1, heartRateRecovery1MinBpm)
+        putNullableInt(KEY_HRR_2, heartRateRecovery2MinBpm)
+    }
+
+    companion object {
+        private const val KEY_ZONE_SECONDS = "zoneSeconds"
+        private const val KEY_ZONE_BOUNDS = "zoneLowerBoundsBpm"
+        private const val KEY_TRIMP = "trimp"
+        private const val KEY_HRR_1 = "heartRateRecovery1MinBpm"
+        private const val KEY_HRR_2 = "heartRateRecovery2MinBpm"
+
+        fun fromBundle(bundle: Bundle): OpenLinkWorkoutSummary = OpenLinkWorkoutSummary(
+            zoneSeconds = bundle.getIntegerArrayList(KEY_ZONE_SECONDS).orEmpty(),
+            zoneLowerBoundsBpm = bundle.getIntegerArrayList(KEY_ZONE_BOUNDS).orEmpty(),
+            trimp = bundle.getNullableDouble(KEY_TRIMP),
+            heartRateRecovery1MinBpm = bundle.getNullableInt(KEY_HRR_1),
+            heartRateRecovery2MinBpm = bundle.getNullableInt(KEY_HRR_2),
+        )
+    }
+}
+
+/**
+ * Where a recording session stands on one device. [reason] is a code, never a message.
+ * [summary] comes with `STOPPED` of a recorded workout (version 2); the host may report
+ * `STOPPED` again with a fuller one, as the heart-rate recovery is known two minutes later.
+ */
 data class OpenLinkRecordingState(
     val sessionId: String,
     val deviceId: String,
     val phase: OpenLinkRecordingPhase,
     val reason: String? = null,
     val atMillis: Long = 0L,
+    val summary: OpenLinkWorkoutSummary? = null,
 ) : Parcelable {
     fun toBundle(): Bundle = Bundle().apply {
         putString(KEY_SESSION, sessionId)
@@ -68,6 +114,7 @@ data class OpenLinkRecordingState(
         putString(KEY_PHASE, phase.name)
         if (reason != null) putString(KEY_REASON, reason)
         putLong(KEY_AT, atMillis)
+        if (summary != null) putBundle(KEY_SUMMARY, summary.toBundle())
     }
 
     /**
@@ -87,6 +134,7 @@ data class OpenLinkRecordingState(
         private const val KEY_PHASE = "phase"
         private const val KEY_REASON = "reason"
         private const val KEY_AT = "atMillis"
+        private const val KEY_SUMMARY = "summary"
 
         /** The reason codes hosts send; the last three are version 2. */
         const val REASON_NO_DEVICE = "no_device"
@@ -105,6 +153,7 @@ data class OpenLinkRecordingState(
             phase = bundle.getEnumOrNull<OpenLinkRecordingPhase>(KEY_PHASE) ?: OpenLinkRecordingPhase.FAILED,
             reason = bundle.getString(KEY_REASON),
             atMillis = bundle.getLong(KEY_AT, 0L),
+            summary = bundle.getBundle(KEY_SUMMARY)?.let(OpenLinkWorkoutSummary::fromBundle),
         )
 
         @JvmField

@@ -49,7 +49,16 @@ enum class OpenLinkRecordingPhase { STARTING, RECORDING, PAUSED, STOPPED, FAILED
 enum class OpenLinkRecordingMode { STREAM, RECORD }
 
 /** What a device can do when it records a workout of its own (version 2). */
-enum class OpenLinkRecordingFeature { GPS, HEART_RATE, PAUSE }
+enum class OpenLinkRecordingFeature { GPS, HEART_RATE, PAUSE, AUTO_PAUSE }
+
+/** What a device measures and its host writes to Health Connect (version 2). */
+enum class OpenLinkMeasurement { HEART_RATE, HRV, SPO2, SKIN_TEMPERATURE }
+
+/**
+ * How a device's last sync ended (version 2). [lastSyncedAtMillis][OpenLinkDevice.lastSyncedAtMillis]
+ * stays the last one that succeeded.
+ */
+enum class OpenLinkSyncResult { SUCCEEDED, INTERRUPTED, PERMISSION_MISSING, DISCONNECTED, FAILED }
 
 /**
  * The sample types a live subscription can ask for. A host answers the ones its devices

@@ -25,6 +25,11 @@ data class OpenLinkDevice(
     val recordingFeatures: Set<OpenLinkRecordingFeature> = emptySet(),
     /** The Health Connect exercise types the device can record itself (version 2). */
     val exerciseTypes: Set<Int> = emptySet(),
+    /** What the device measures (version 2). */
+    val measurements: Set<OpenLinkMeasurement> = emptySet(),
+    /** How the last sync ended, and when it was tried (version 2); null if never. */
+    val lastSyncResult: OpenLinkSyncResult? = null,
+    val lastSyncAttemptAtMillis: Long? = null,
 ) : Parcelable {
     fun toBundle(): Bundle = Bundle().apply {
         putString(KEY_ID, id)
@@ -41,6 +46,9 @@ data class OpenLinkDevice(
         putStringArrayList(KEY_LIVE_TYPES, ArrayList(liveSampleTypes.map { it.name }))
         putStringArrayList(KEY_RECORDING_FEATURES, ArrayList(recordingFeatures.map { it.name }))
         putIntegerArrayList(KEY_EXERCISE_TYPES, ArrayList(exerciseTypes))
+        putStringArrayList(KEY_MEASUREMENTS, ArrayList(measurements.map { it.name }))
+        if (lastSyncResult != null) putString(KEY_SYNC_RESULT, lastSyncResult.name)
+        putNullableLong(KEY_SYNC_ATTEMPT_AT, lastSyncAttemptAtMillis)
     }
 
     override fun describeContents(): Int = 0
@@ -62,6 +70,9 @@ data class OpenLinkDevice(
         private const val KEY_LIVE_TYPES = "liveSampleTypes"
         private const val KEY_RECORDING_FEATURES = "recordingFeatures"
         private const val KEY_EXERCISE_TYPES = "exerciseTypes"
+        private const val KEY_MEASUREMENTS = "measurements"
+        private const val KEY_SYNC_RESULT = "lastSyncResult"
+        private const val KEY_SYNC_ATTEMPT_AT = "lastSyncAttemptAtMillis"
 
         /** Null when the bundle lacks what every device must have: an id, a name, a kind and an integration. */
         fun fromBundleOrNull(bundle: Bundle): OpenLinkDevice? {
@@ -84,6 +95,9 @@ data class OpenLinkDevice(
                 liveSampleTypes = bundle.getEnumSet(KEY_LIVE_TYPES),
                 recordingFeatures = bundle.getEnumSet(KEY_RECORDING_FEATURES),
                 exerciseTypes = bundle.getIntegerArrayList(KEY_EXERCISE_TYPES).orEmpty().toSet(),
+                measurements = bundle.getEnumSet(KEY_MEASUREMENTS),
+                lastSyncResult = bundle.getEnumOrNull<OpenLinkSyncResult>(KEY_SYNC_RESULT),
+                lastSyncAttemptAtMillis = bundle.getNullableLong(KEY_SYNC_ATTEMPT_AT),
             )
         }
 

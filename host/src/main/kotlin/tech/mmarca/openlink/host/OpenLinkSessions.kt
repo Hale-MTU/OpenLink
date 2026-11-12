@@ -4,8 +4,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import tech.mmarca.openlink.OpenLink
+import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
+import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkWorkoutSummary
 
 /** A recording session or live subscription a client holds on the host. */
 data class OpenLinkActiveSession(
@@ -17,35 +20,56 @@ data class OpenLinkActiveSession(
 
 /** What a start from a client comes to. */
 sealed interface OpenLinkStart {
-    /** The session is the caller's now (or already was): hand it to the host app. */
+    /** The session is the caller's now: hand it to the host app. */
     data object Begin : OpenLinkStart
 
-    /** Another client owns the session id: nothing happens. */
+    /** The caller holds it already: nothing to hand on; tell the caller [last] if it is known. */
+    data class Already(val last: OpenLinkRecordingState?) : OpenLinkStart
+
+    /** Another client owns the session id, or the id is not one the host takes: nothing happens. */
     data object Refused : OpenLinkStart
 
     /** The caller's recording ended while it was away: tell it [last], start nothing. */
     data class Ended(val last: OpenLinkRecordingState) : OpenLinkStart
+
+    /** The request cannot be taken: tell the caller `FAILED` with [reason]. */
+    data class Failed(val reason: String) : OpenLinkStart
 }
 
 /**
- * Which client owns which recording session and live subscription. Events for a session go
- * to its owner only, and what a client loses (its capability, its binding) ends what it
- * owned. Plain Kotlin, tested on the JVM.
+ * Which client owns which recording session and live subscription, and the rules of a
+ * recorded workout that need no device. Events for a session go to its owner only, and what a
+ * client loses (its capability, its binding) ends what it owned. Plain Kotlin, tested on the JVM.
  *
- * A detached session (a workout the wearable records itself) outlives its owner's binding,
- * and, with a [storage], the host's process: it and the last [MAX_FINISHED] such sessions the
- * host ended are written there, so a host that restarts mid-workout still knows whose it is,
- * and a start replayed after the end still meets that end.
+ * A recorded workout (a session in [OpenLinkRecordingMode.RECORD]) outlives its owner's
+ * binding. This class holds its state (paused or not, since when, being stopped) and passes on
+ * only what changes it: a repeated or older pause or resume, a repeated start or stop, is
+ * dropped here, so the host app sees each real change once. A stop by the owner keeps the
+ * session until the host app reports its end, which then reaches the owner with its summary.
+ *
+ * With a [storage], recorded workouts and the last [MAX_FINISHED] ended ones survive a restart
+ * of the host's process.
  */
 class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
     private data class Key(val capability: String, val sessionId: String)
 
+    /** A recorded workout's state as the clients and the host app have set it. */
+    private data class Workout(
+        val paused: Boolean = false,
+        /** The time of the last change, on the phone's clock: an older request is dropped. */
+        val changedAtMillis: Long = 0L,
+        /** The owner stopped it; it waits for the host app to report the end. */
+        val stopping: Boolean = false,
+        /** The last state the host app reported, for an owner that comes back. */
+        val last: OpenLinkRecordingState? = null,
+    )
+
     private val owners = linkedMapOf<Key, String>()
 
-    /** Sessions that outlive their owner's binding: a wearable that records on its own. */
-    private val detached = mutableSetOf<Key>()
+    /** The recorded workouts held now, by session id. */
+    private val workouts = mutableMapOf<String, Workout>()
 
-    /** The last detached recordings the host ended, oldest first, with their owner and final state. */
+    /** The last recorded workouts the host ended, oldest first, with their owner and final state. */
     private val finished = linkedMapOf<String, Pair<String, OpenLinkRecordingState>>()
 
     private val _active = MutableStateFlow<List<OpenLinkActiveSession>>(emptyList())
@@ -58,42 +82,76 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
         publish()
     }
 
-    /**
-     * Gives [sessionId] to [packageName], or confirms it already has it; a repeat keeps how the
-     * session was first claimed. A [detached] session keeps running when its owner unbinds or
-     * dies ([releaseAll] with `keepDetached`); only the owner stopping it, the host ending it
-     * ([reported]) or the owner losing the capability ends it.
-     */
+    /** Gives [sessionId] to [packageName], or confirms it already has it (a live subscription). */
     @Synchronized
-    fun claim(capability: String, sessionId: String, packageName: String, detached: Boolean = false): Boolean {
+    fun claim(capability: String, sessionId: String, packageName: String): Boolean {
         val key = Key(capability, sessionId)
         val owner = owners[key]
         if (owner != null && owner != packageName) return false
         if (owner == null) {
             owners[key] = packageName
-            if (detached) {
-                this.detached += key
-                storage?.write(storageKey(sessionId), "$ACTIVE\t$packageName")
-            }
             publish()
         }
         return true
     }
 
-    /** A recording start: its end if the caller's recording already ended, else a [claim]. */
+    /** A recording start from [packageName]. See [OpenLinkStart]. */
     @Synchronized
-    fun startRecording(sessionId: String, packageName: String, detached: Boolean): OpenLinkStart {
+    fun startRecording(request: OpenLinkRecordingRequest, packageName: String): OpenLinkStart {
+        val sessionId = request.sessionId
+        if (sessionId.isBlank() || sessionId.length > MAX_SESSION_ID_LENGTH) return OpenLinkStart.Refused
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
-        if (key !in owners) {
-            finished[sessionId]?.takeIf { it.first == packageName }?.let { return OpenLinkStart.Ended(it.second) }
+        when (owners[key]) {
+            packageName -> return OpenLinkStart.Already(workouts[sessionId]?.last)
+            null -> Unit
+            else -> return OpenLinkStart.Refused
         }
-        return if (claim(OpenLink.CAPABILITY_RECORDING, sessionId, packageName, detached)) OpenLinkStart.Begin else OpenLinkStart.Refused
+        finished[sessionId]?.takeIf { it.first == packageName }?.let { return OpenLinkStart.Ended(it.second) }
+        if (request.mode == OpenLinkRecordingMode.RECORD) {
+            if (request.deviceId.isNullOrBlank()) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_NO_DEVICE)
+            val held = workouts.keys.count { owners[Key(OpenLink.CAPABILITY_RECORDING, it)] == packageName }
+            if (held >= MAX_WORKOUTS_PER_APP) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY)
+            workouts[sessionId] = Workout(changedAtMillis = request.startedAtMillis)
+        }
+        owners[key] = packageName
+        save(sessionId)
+        publish()
+        return OpenLinkStart.Begin
     }
 
-    /** Whether [packageName] may pause, resume or stop the recording [sessionId]: it owns it. */
+    /**
+     * The owner asks to pause ([pause]) or resume its recorded workout at [atMillis]. True if it
+     * changes the workout: the host app is to act on it. A stream session has no pause.
+     */
     @Synchronized
-    fun controls(sessionId: String, packageName: String): Boolean =
-        owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] == packageName
+    fun control(sessionId: String, packageName: String, pause: Boolean, atMillis: Long): Boolean {
+        if (owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] != packageName) return false
+        val workout = workouts[sessionId] ?: return false
+        if (workout.stopping || workout.paused == pause || atMillis < workout.changedAtMillis) return false
+        workouts[sessionId] = workout.copy(paused = pause, changedAtMillis = atMillis)
+        save(sessionId)
+        return true
+    }
+
+    /**
+     * The owner stops [sessionId]. True if the host app is to stop it. A stream session is
+     * released at once; a recorded workout stays the owner's until the host app reports its end.
+     */
+    @Synchronized
+    fun stopRecording(sessionId: String, packageName: String): Boolean {
+        val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
+        if (owners[key] != packageName) return false
+        val workout = workouts[sessionId]
+        if (workout == null) {
+            drop(key)
+            publish()
+            return true
+        }
+        if (workout.stopping) return false
+        workouts[sessionId] = workout.copy(stopping = true)
+        save(sessionId)
+        return true
+    }
 
     @Synchronized
     fun release(capability: String, sessionId: String, packageName: String): Boolean {
@@ -106,18 +164,37 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
 
     /**
      * The host app reported [state]: returns the owner to tell, or null if no one holds the
-     * session. A detached session the state ends is over for good: it is remembered as ended.
+     * session. A pause or resume on the watch changes the workout as one from the owner would;
+     * an end makes it over for good, remembered as ended. A later end for an ended one (a fuller
+     * summary) replaces what is remembered and reaches its owner too.
      */
     @Synchronized
     fun reported(state: OpenLinkRecordingState): String? {
-        val key = Key(OpenLink.CAPABILITY_RECORDING, state.sessionId)
-        val owner = owners[key] ?: return null
+        val sessionId = state.sessionId
+        val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
         val over = state.phase == OpenLinkRecordingPhase.STOPPED || state.phase == OpenLinkRecordingPhase.FAILED
-        if (over && key in detached) {
-            drop(key)
-            remember(state.sessionId, owner, state)
-            publish()
+        val owner = owners[key] ?: run {
+            val ended = finished[sessionId]?.first ?: return null
+            if (!over) return null
+            remember(sessionId, ended, state)
+            return ended
         }
+        val workout = workouts[sessionId] ?: return owner
+        if (over) {
+            drop(key)
+            remember(sessionId, owner, state)
+            publish()
+            return owner
+        }
+        workouts[sessionId] = when (state.phase) {
+            OpenLinkRecordingPhase.PAUSED, OpenLinkRecordingPhase.RECORDING -> workout.copy(
+                paused = state.phase == OpenLinkRecordingPhase.PAUSED,
+                changedAtMillis = maxOf(workout.changedAtMillis, state.atMillis),
+                last = state,
+            )
+            else -> workout.copy(last = state)
+        }
+        save(sessionId)
         return owner
     }
 
@@ -126,12 +203,13 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
 
     /**
      * Removes and returns the session ids [packageName] owns under [capability]; with
-     * [keepDetached], the detached ones stay.
+     * [keepDetached], its recorded workouts stay.
      */
     @Synchronized
     fun releaseAll(packageName: String, capability: String, keepDetached: Boolean = false): List<String> {
         val keys = owners.filter { (key, owner) ->
-            owner == packageName && key.capability == capability && !(keepDetached && key in detached)
+            owner == packageName && key.capability == capability &&
+                !(keepDetached && key.capability == OpenLink.CAPABILITY_RECORDING && key.sessionId in workouts)
         }.keys.toList()
         keys.forEach(::drop)
         if (keys.isNotEmpty()) publish()
@@ -140,13 +218,29 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
 
     private fun drop(key: Key) {
         owners.remove(key)
-        if (detached.remove(key)) storage?.remove(storageKey(key.sessionId))
+        if (key.capability == OpenLink.CAPABILITY_RECORDING && workouts.remove(key.sessionId) != null) {
+            storage?.remove(storageKey(key.sessionId))
+        }
+    }
+
+    /** Writes the recorded workout [sessionId], if it is one, to the storage. */
+    private fun save(sessionId: String) {
+        val workout = workouts[sessionId] ?: return
+        val owner = owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] ?: return
+        storage?.write(
+            storageKey(sessionId),
+            listOf(ACTIVE, owner, flag(workout.paused), workout.changedAtMillis.toString(), flag(workout.stopping)).joinToString("\t"),
+        )
     }
 
     private fun remember(sessionId: String, owner: String, last: OpenLinkRecordingState) {
         finished.remove(sessionId)
         finished[sessionId] = owner to last
         storage?.write(storageKey(sessionId), encodeFinished(owner, last))
+        trimFinished()
+    }
+
+    private fun trimFinished() {
         while (finished.size > MAX_FINISHED) {
             val eldest = finished.keys.first()
             finished.remove(eldest)
@@ -160,32 +254,24 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
         for ((storedKey, value) in stored) {
             val sessionId = storedKey.removePrefix(KEY_PREFIX)
             val fields = value.split('\t', limit = 6)
-            when {
-                fields.size == 2 && fields[0] == ACTIVE && fields[1].isNotEmpty() -> {
-                    val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
-                    owners[key] = fields[1]
-                    detached += key
-                }
-                fields.size == 6 && fields[0] == FINISHED -> {
-                    val phase = runCatching { OpenLinkRecordingPhase.valueOf(fields[2]) }.getOrNull()
-                    val at = fields[3].toLongOrNull()
-                    if (phase != null && at != null) {
-                        val last = OpenLinkRecordingState(sessionId, fields[5], phase, fields[4].ifEmpty { null }, at)
-                        ended += Triple(sessionId, fields[1], last)
-                    } else {
-                        storage?.remove(storedKey)
-                    }
-                }
-                // Written by a newer or broken build: not ours to keep.
-                else -> storage?.remove(storedKey)
+            val kept = when (fields[0]) {
+                ACTIVE -> loadWorkout(sessionId, fields)
+                FINISHED -> decodeFinished(sessionId, fields)?.let { ended += Triple(sessionId, fields[1], it) } != null
+                else -> false
             }
+            // Written by a newer or broken build: not ours to keep.
+            if (!kept) storage?.remove(storedKey)
         }
         ended.sortedBy { it.third.atMillis }.forEach { (sessionId, owner, last) -> finished[sessionId] = owner to last }
-        while (finished.size > MAX_FINISHED) {
-            val eldest = finished.keys.first()
-            finished.remove(eldest)
-            storage?.remove(storageKey(eldest))
-        }
+        trimFinished()
+    }
+
+    private fun loadWorkout(sessionId: String, fields: List<String>): Boolean {
+        if (fields.size != 5 || fields[1].isEmpty()) return false
+        val changedAt = fields[3].toLongOrNull() ?: return false
+        owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] = fields[1]
+        workouts[sessionId] = Workout(paused = fields[2] == "1", changedAtMillis = changedAt, stopping = fields[4] == "1")
+        return true
     }
 
     private fun publish() {
@@ -198,6 +284,12 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
         /** How many ended recordings are remembered. */
         const val MAX_FINISHED = 16
 
+        /** How many recorded workouts one app may hold at once; one per device is the usual. */
+        const val MAX_WORKOUTS_PER_APP = 4
+
+        /** The longest session id the host takes: the client chooses it, and it is stored. */
+        const val MAX_SESSION_ID_LENGTH = 128
+
         /** Keys in the storage; the trust store's start with "client.", so both may share one. */
         const val KEY_PREFIX = "session."
 
@@ -206,7 +298,45 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
 
         private fun storageKey(sessionId: String) = KEY_PREFIX + sessionId
 
-        private fun encodeFinished(owner: String, last: OpenLinkRecordingState): String =
-            listOf(FINISHED, owner, last.phase.name, last.atMillis.toString(), last.reason.orEmpty(), last.deviceId).joinToString("\t")
+        private fun flag(value: Boolean) = if (value) "1" else "0"
+
+        // The summary goes before the device id, which is last and may hold anything: the summary
+        // is five ";"-separated fields of numbers and ","-separated lists, then a tab.
+        private fun encodeFinished(owner: String, last: OpenLinkRecordingState): String {
+            val summary = last.summary?.let {
+                listOf(
+                    it.zoneSeconds.joinToString(","),
+                    it.zoneLowerBoundsBpm.joinToString(","),
+                    it.trimp?.toString().orEmpty(),
+                    it.heartRateRecovery1MinBpm?.toString().orEmpty(),
+                    it.heartRateRecovery2MinBpm?.toString().orEmpty(),
+                ).joinToString(";")
+            }.orEmpty()
+            return listOf(FINISHED, owner, last.phase.name, last.atMillis.toString(), last.reason.orEmpty(), summary + "\t" + last.deviceId)
+                .joinToString("\t")
+        }
+
+        private fun decodeFinished(sessionId: String, fields: List<String>): OpenLinkRecordingState? {
+            if (fields.size != 6 || fields[1].isEmpty()) return null
+            val phase = runCatching { OpenLinkRecordingPhase.valueOf(fields[2]) }.getOrNull() ?: return null
+            val at = fields[3].toLongOrNull() ?: return null
+            val rest = fields[5]
+            val tab = rest.indexOf('\t')
+            if (tab < 0) return null
+            return OpenLinkRecordingState(sessionId, rest.substring(tab + 1), phase, fields[4].ifEmpty { null }, at, decodeSummary(rest.substring(0, tab)))
+        }
+
+        private fun decodeSummary(text: String): OpenLinkWorkoutSummary? {
+            val parts = text.split(';')
+            if (parts.size != 5) return null
+            fun ints(list: String) = if (list.isEmpty()) emptyList() else list.split(',').mapNotNull(String::toIntOrNull)
+            return OpenLinkWorkoutSummary(
+                zoneSeconds = ints(parts[0]),
+                zoneLowerBoundsBpm = ints(parts[1]),
+                trimp = parts[2].toDoubleOrNull(),
+                heartRateRecovery1MinBpm = parts[3].toIntOrNull(),
+                heartRateRecovery2MinBpm = parts[4].toIntOrNull(),
+            )
+        }
     }
 }

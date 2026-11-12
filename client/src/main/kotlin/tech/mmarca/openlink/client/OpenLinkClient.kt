@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import tech.mmarca.openlink.IOpenLinkHost
 import tech.mmarca.openlink.IOpenLinkListener
 import tech.mmarca.openlink.OpenLink
+import tech.mmarca.openlink.OpenLinkDataWritten
 import tech.mmarca.openlink.OpenLinkDevice
 import tech.mmarca.openlink.OpenLinkLiveBatch
 import tech.mmarca.openlink.OpenLinkLiveSubscription
@@ -70,6 +71,7 @@ class OpenLinkClient(
     val hostProfile: StateFlow<OpenLinkProfile?> = core.hostProfile
     val recordingStates: SharedFlow<OpenLinkRecordingState> = core.recordingStates
     val liveBatches: SharedFlow<OpenLinkLiveBatch> = core.liveBatches
+    val dataWritten: SharedFlow<OpenLinkDataWritten> = core.dataWritten
     val profileExchangedAtMillis: StateFlow<Long> = core.profileExchangedAtMillis
 
     private val listener = object : IOpenLinkListener.Stub() {
@@ -78,6 +80,7 @@ class OpenLinkClient(
         override fun onDevicesChanged(devices: MutableList<OpenLinkDevice>?) = post { core.events.onDevicesChanged(devices.orEmpty()) }
         override fun onRecordingStateChanged(state: OpenLinkRecordingState?) = post { core.events.onRecordingStateChanged(state ?: return@post) }
         override fun onLiveSamples(batch: OpenLinkLiveBatch?) = post { core.events.onLiveSamples(batch ?: return@post) }
+        override fun onDataWritten(written: OpenLinkDataWritten?) = post { core.events.onDataWritten(written ?: return@post) }
     }
 
     /** Whether the host app is installed and exports a service this client may bind. */

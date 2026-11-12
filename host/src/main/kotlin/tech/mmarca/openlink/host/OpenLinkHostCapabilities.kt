@@ -25,8 +25,12 @@ interface OpenLinkHostCapabilities {
     fun stopRecording(caller: OpenLinkCaller, sessionId: String)
 
     /**
-     * Version 2. Only for the session's owner. [atMillis] is the client's clock: a request older
-     * than the session's last change is the host app's to ignore, and so is a repeat.
+     * Version 2, for a recorded workout only. The library passes on only what changes the
+     * workout: from its owner, not repeated, not older ([atMillis], the phone's clock) than the
+     * last change, which a pause or resume the host app reported counts as. A start for a
+     * recorded workout comes once, with a device id; a stop comes once, and the session stays
+     * the owner's until the host app reports `STOPPED` or `FAILED`. One workout per device
+     * (`busy`) is the host app's to check: only it knows its devices.
      */
     fun pauseRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long)
     fun resumeRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long)

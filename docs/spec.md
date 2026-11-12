@@ -179,6 +179,8 @@ oneway interface IOpenLinkListener {
     void onDevicesChanged(in List<OpenLinkDevice> devices);
     void onRecordingStateChanged(in OpenLinkRecordingState state);
     void onLiveSamples(in OpenLinkLiveBatch batch);
+    // version 2 (appended last), sent only to a client that negotiated version 2
+    void onDataWritten(in OpenLinkDataWritten written);                // capability devices
 }
 ```
 
@@ -212,8 +214,9 @@ so an old client never crashes against a stricter host.
 ### Versioning
 
 `protocolVersion` is an integer, 2 in this version. Version 2 adds `RECORD` mode, the `PAUSED`
-phase, `pauseRecording` and `resumeRecording`, and the device fields `recordingFeatures` and
-`exerciseTypes`. A client sends `RECORD` only when the host answered version 2 or higher (a host
+phase, `pauseRecording` and `resumeRecording`, the workout summary, `onDataWritten`, and the
+device fields `recordingFeatures`, `exerciseTypes`, `measurements`, `lastSyncResult` and
+`lastSyncAttemptAtMillis`. A client sends `RECORD` only when the host answered version 2 or higher (a host
 on version 1 would ignore `mode` and stream instead); the client library fails such a request
 itself with the reason `unsupported`. A host never reports `PAUSED` to a client that negotiated
 version 1, which reads an unknown phase as `FAILED`: it reports `RECORDING` instead. Both sides send theirs in `hello()`; the
@@ -231,8 +234,11 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
   `integration` (`GARMIN`, `WEAROS`, `XIAOMI`), `connection` (`CONNECTED`, `DISCONNECTED`,
   `UNKNOWN`), `batteryPercent`, `batteryUpdatedAtMillis`, `lastSyncedAtMillis`, `syncing`,
   `supportsSync`, `supportsRecording`, `liveSampleTypes`, and from version 2 `recordingFeatures`
-  (subset of `GPS`, `HEART_RATE`, `PAUSE`: what the device does when it records a workout of its
-  own) and `exerciseTypes` (the Health Connect exercise types it can record itself).
+  (subset of `GPS`, `HEART_RATE`, `PAUSE`, `AUTO_PAUSE`: what the device does when it records a
+  workout of its own), `exerciseTypes` (the Health Connect exercise types it can record itself),
+  `measurements` (subset of `HEART_RATE`, `HRV`, `SPO2`, `SKIN_TEMPERATURE`: what it measures),
+  `lastSyncResult` (`SUCCEEDED`, `INTERRUPTED`, `PERMISSION_MISSING`, `DISCONNECTED`, `FAILED`)
+  and `lastSyncAttemptAtMillis`; `lastSyncedAtMillis` stays the last sync that succeeded.
 - `OpenLinkRecordingRequest`: `sessionId` (chosen by the client, unique), `exerciseType`
   (the Health Connect exercise type), `startedAtMillis`, `deviceId` (null: every device that
   supports recording), and from version 2 `mode` (`STREAM`, the default, or `RECORD`; `deviceId`
@@ -240,7 +246,15 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
 - `OpenLinkRecordingState`: `sessionId`, `deviceId`, `phase` (`STARTING`, `RECORDING`, `PAUSED`
   from version 2, `STOPPED`, `FAILED`), `reason` (a code: `no_device`, `not_connected`,
   `unsupported`, `stopped_by_client`, `host_stopped`, and from version 2 `stopped_on_device`,
-  `busy`, `no_association`, `no_gps`), `atMillis`.
+  `busy`, `no_association`, `no_gps`), `atMillis`, and from version 2 `summary`.
+- `OpenLinkWorkoutSummary` (version 2), with `STOPPED` of a recorded workout: `zoneSeconds` and
+  `zoneLowerBoundsBpm` (per heart-rate zone, zone 1 first), `trimp`, `heartRateRecovery1MinBpm`,
+  `heartRateRecovery2MinBpm`, all optional. Only what Health Connect has no type for: pauses go
+  to Health Connect as pause segments and splits as laps. The host may report `STOPPED` again
+  with a fuller summary once the recovery is known; it reaches the owner like the first.
+- `OpenLinkDataWritten` (version 2): `recordTypes` (Health Connect record names without
+  "Record", such as `HeartRate`), `fromMillis`, `toMillis`, `deviceId`. The host wrote new data
+  to Health Connect; no values. A client reads Health Connect again instead of polling it.
 - `OpenLinkLiveSubscription`: `sessionId`, `types` (subset of `HEART_RATE`, `STEPS`,
   `CADENCE`, `POWER`), `deviceId`.
 - `OpenLinkLiveBatch`: `sessionId`, `deviceId`, and samples (`type`, `atMillis`, `value`),
@@ -251,17 +265,39 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
 
 In `RECORD` mode the wearable records the whole workout and the host saves it to Health Connect;
 the client only controls it. Whoever records, writes: one recorder, one session in Health Connect,
-nothing merged. The rules, which the host app enforces because it knows its devices:
+nothing merged.
 
-- One workout per device: a request for a device that records already gets `FAILED`, reason `busy`.
-- A repeated start, pause, resume or stop for the same `sessionId` changes nothing.
-- The host holds the state (recording, paused, stopped) with the time of its last change, and
-  ignores a request older than that. Every time is the phone's clock.
-- The wearable controls too. A pause, resume or stop on it reaches the owner through
-  `onRecordingStateChanged` (a stop with the reason `stopped_on_device`), so the owner holds no
-  state of its own that could disagree with the host's.
-- The library enforces the part that needs no device: only the owner may pause or resume, and a
-  session in `RECORD` mode outlives its owner's binding (above).
+The host library (`OpenLinkSessions`) enforces every rule that needs no device, so each host app
+does not build them again, and hands the host app only what changes a workout:
+
+- A request in `RECORD` mode needs a `deviceId`; without one it gets `FAILED`, reason
+  `no_device`. A session id is at most 128 characters, and one app holds at most 4 recorded
+  workouts at once (more get `FAILED`, reason `busy`).
+- A repeated start, pause, resume or stop changes nothing and is not handed on. A repeated start
+  is answered with the workout's last reported state, so a client that reconnects learns where
+  the workout stands.
+- The host holds the state (recording or paused) with the time of its last change, and drops a
+  request older than that. Every time is the phone's clock. A pause or resume the host app
+  reports from the wearable counts as a change, so a client's older wish that it replays after a
+  reconnect does not undo a press on the watch.
+- Pause and resume are for `RECORD` only; a stream session has no pause.
+- A stop from the owner does not end the session at once: it stays the owner's until the host
+  app reports `STOPPED` or `FAILED`, so that end, with the workout's summary, reaches the owner.
+  While it is stopping, no pause or resume is handed on.
+- Only the owner may pause, resume or stop it, and it outlives its owner's binding (above).
+
+What the host app enforces, because it knows its devices: one workout per device (a request for
+a device that records already gets `FAILED`, reason `busy`), and that the wearable controls too.
+A pause, resume or stop on the wearable reaches the owner through `onRecordingStateChanged` (a
+stop with the reason `stopped_on_device`), so the owner holds no state of its own that could
+disagree with the host's.
+
+The client library delivers what it was asked while it was not connected, since such a session
+outlives the binding: a stop of a `RECORD` session is kept until the host has it, and the last
+pause or resume is sent again, with the time it was asked, after the start it replays, unless the
+host has since reported a newer state. It takes in the end of a workout it stopped, and a fuller
+end of one that ended, for the last 16 such workouts; in memory only, so a later summary for a
+workout whose client process died meanwhile comes back through the replayed start.
 
 ### What a recording session means in `STREAM` mode (version 1)
 
