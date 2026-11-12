@@ -121,6 +121,9 @@ class OpenLinkClientCore(
      */
     private val pendingStops = linkedSetOf<String>()
 
+    /** Recorded workouts a host has been sent: losing the capability ends them there. */
+    private val begun = mutableSetOf<String>()
+
     /** Recorded workouts the host ended lately, whose fuller end (a later summary) still counts. */
     private val ended = linkedSetOf<String>()
     private val subscriptions = linkedMapOf<String, OpenLinkLiveSubscription>()
@@ -194,6 +197,7 @@ class OpenLinkClientCore(
 
     fun stopRecording(sessionId: String) {
         controls.remove(sessionId)
+        begun.remove(sessionId)
         val request = recordings.remove(sessionId) ?: return
         if (request.mode == OpenLinkRecordingMode.RECORD) {
             // Its end comes after the stop, with the workout's summary.
@@ -259,8 +263,21 @@ class OpenLinkClientCore(
         }
         // Replay what the app holds whenever the capability is newly there: after a reconnect
         // (before is null) or a grant. The host ignores a session it already has.
-        // Without the capability the host has ended every session of this app: no stop is owed.
-        if (!state.has(OpenLink.CAPABILITY_RECORDING)) pendingStops.clear()
+        // Without the capability the host has ended every session of this app: no stop is owed,
+        // and a recorded workout it had is over. Replaying its start on a later grant would begin
+        // a new one. One that only waited for the grant is still to send.
+        if (!state.has(OpenLink.CAPABILITY_RECORDING)) {
+            pendingStops.clear()
+            for (sessionId in begun.toList()) {
+                val request = recordings.remove(sessionId) ?: continue
+                controls.remove(sessionId)
+                remember(sessionId)
+                _recordingStates.tryEmit(
+                    OpenLinkRecordingState(sessionId, request.deviceId.orEmpty(), OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_HOST_STOPPED, clock()),
+                )
+            }
+            begun.clear()
+        }
         if (state.has(OpenLink.CAPABILITY_RECORDING) && before?.has(OpenLink.CAPABILITY_RECORDING) != true) {
             flushStops()
             // A copy: a request this host cannot take is dropped from the map as it is replayed.
@@ -294,6 +311,7 @@ class OpenLinkClientCore(
             return
         }
         host.startRecording(request)
+        if (request.mode == OpenLinkRecordingMode.RECORD) begun += request.sessionId
         controls[request.sessionId]?.let { (paused, at) ->
             if (paused) host.pauseRecording(request.sessionId, at) else host.resumeRecording(request.sessionId, at)
         }
@@ -356,6 +374,7 @@ class OpenLinkClientCore(
                 if (over) {
                     recordings.remove(state.sessionId)
                     controls.remove(state.sessionId)
+                    begun.remove(state.sessionId)
                     remember(state.sessionId)
                 } else if (state.phase == OpenLinkRecordingPhase.PAUSED || state.phase == OpenLinkRecordingPhase.RECORDING) {
                     // The host's word is newer than the app's last wish (a press on the watch, or

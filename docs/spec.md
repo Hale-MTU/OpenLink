@@ -275,7 +275,9 @@ does not build them again, and hands the host app only what changes a workout:
   workouts at once (more get `FAILED`, reason `busy`).
 - A repeated start, pause, resume or stop changes nothing and is not handed on. A repeated start
   is answered with the workout's last reported state, so a client that reconnects learns where
-  the workout stands.
+  the workout stands (after a restart of the host that state is unknown until the host app
+  reports again). A start that got `FAILED` uses up nothing: it may be tried again with the
+  same session id.
 - The host holds the state (recording or paused) with the time of its last change, and drops a
   request older than that. Every time is the phone's clock. A pause or resume the host app
   reports from the wearable counts as a change, so a client's older wish that it replays after a
@@ -283,7 +285,14 @@ does not build them again, and hands the host app only what changes a workout:
 - Pause and resume are for `RECORD` only; a stream session has no pause.
 - A stop from the owner does not end the session at once: it stays the owner's until the host
   app reports `STOPPED` or `FAILED`, so that end, with the workout's summary, reaches the owner.
-  While it is stopping, no pause or resume is handed on.
+  While it is stopping, no pause or resume is handed on. The host app must report an end for every
+  stop, also for a device that is gone (`FAILED`, `not_connected`); without one the library takes
+  the workout as stopped by the host (`host_stopped`) after 30 minutes, and an end reported later
+  still reaches the owner.
+- A recorded workout that ends because its owner lost the capability is remembered as
+  `STOPPED`, `host_stopped`, so a start the client replays once it has the capability again does
+  not begin a new workout. The client library, too, drops a recorded workout a host had once it
+  hears the capability is gone, and reports it `STOPPED`, `host_stopped`.
 - Only the owner may pause, resume or stop it, and it outlives its owner's binding (above).
 
 What the host app enforces, because it knows its devices: one workout per device (a request for

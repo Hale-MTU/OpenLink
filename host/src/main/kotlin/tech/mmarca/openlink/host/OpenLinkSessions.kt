@@ -50,7 +50,10 @@ sealed interface OpenLinkStart {
  * With a [storage], recorded workouts and the last [MAX_FINISHED] ended ones survive a restart
  * of the host's process.
  */
-class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
+class OpenLinkSessions(
+    private val storage: OpenLinkTrustStorage? = null,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
     private data class Key(val capability: String, val sessionId: String)
 
     /** A recorded workout's state as the clients and the host app have set it. */
@@ -60,7 +63,12 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
         val changedAtMillis: Long = 0L,
         /** The owner stopped it; it waits for the host app to report the end. */
         val stopping: Boolean = false,
-        /** The last state the host app reported, for an owner that comes back. */
+        /** When the owner stopped it, on this host's clock. */
+        val stoppedAtMillis: Long = 0L,
+        /**
+         * The last state the host app reported, for an owner that comes back. Not stored: after a
+         * restart of the host it is unknown until the host app reports again.
+         */
         val last: OpenLinkRecordingState? = null,
     )
 
@@ -98,6 +106,7 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
     /** A recording start from [packageName]. See [OpenLinkStart]. */
     @Synchronized
     fun startRecording(request: OpenLinkRecordingRequest, packageName: String): OpenLinkStart {
+        expireStops()
         val sessionId = request.sessionId
         if (sessionId.isBlank() || sessionId.length > MAX_SESSION_ID_LENGTH) return OpenLinkStart.Refused
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
@@ -148,7 +157,7 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
             return true
         }
         if (workout.stopping) return false
-        workouts[sessionId] = workout.copy(stopping = true)
+        workouts[sessionId] = workout.copy(stopping = true, stoppedAtMillis = clock())
         save(sessionId)
         return true
     }
@@ -203,7 +212,9 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
 
     /**
      * Removes and returns the session ids [packageName] owns under [capability]; with
-     * [keepDetached], its recorded workouts stay.
+     * [keepDetached], its recorded workouts stay. A recorded workout that ends here (its owner
+     * lost the capability) is remembered as stopped by the host, so a start its owner replays
+     * once it has the capability again does not begin a new workout.
      */
     @Synchronized
     fun releaseAll(packageName: String, capability: String, keepDetached: Boolean = false): List<String> {
@@ -211,10 +222,34 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
             owner == packageName && key.capability == capability &&
                 !(keepDetached && key.capability == OpenLink.CAPABILITY_RECORDING && key.sessionId in workouts)
         }.keys.toList()
-        keys.forEach(::drop)
+        for (key in keys) {
+            val recorded = key.capability == OpenLink.CAPABILITY_RECORDING && key.sessionId in workouts
+            drop(key)
+            if (recorded) remember(key.sessionId, packageName, hostStopped(key.sessionId))
+        }
         if (keys.isNotEmpty()) publish()
         return keys.map { it.sessionId }
     }
+
+    /**
+     * A workout the owner stopped whose end the host app has not reported for [STOP_TIMEOUT_MILLIS]
+     * (the watch out of reach, the host app lost it) is taken as ended, so it does not hold one of
+     * the owner's places for ever. The real end, if it comes later, still reaches the owner.
+     */
+    private fun expireStops() {
+        val now = clock()
+        val expired = workouts.filter { (_, w) -> w.stopping && now - w.stoppedAtMillis >= STOP_TIMEOUT_MILLIS }.keys.toList()
+        for (sessionId in expired) {
+            val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
+            val owner = owners[key] ?: continue
+            drop(key)
+            remember(sessionId, owner, hostStopped(sessionId))
+        }
+        if (expired.isNotEmpty()) publish()
+    }
+
+    private fun hostStopped(sessionId: String) =
+        OpenLinkRecordingState(sessionId, "", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_HOST_STOPPED, clock())
 
     private fun drop(key: Key) {
         owners.remove(key)
@@ -229,7 +264,8 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
         val owner = owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] ?: return
         storage?.write(
             storageKey(sessionId),
-            listOf(ACTIVE, owner, flag(workout.paused), workout.changedAtMillis.toString(), flag(workout.stopping)).joinToString("\t"),
+            listOf(ACTIVE, owner, flag(workout.paused), workout.changedAtMillis.toString(), flag(workout.stopping), workout.stoppedAtMillis.toString())
+                .joinToString("\t"),
         )
     }
 
@@ -267,10 +303,11 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
     }
 
     private fun loadWorkout(sessionId: String, fields: List<String>): Boolean {
-        if (fields.size != 5 || fields[1].isEmpty()) return false
+        if (fields.size != 6 || fields[1].isEmpty()) return false
         val changedAt = fields[3].toLongOrNull() ?: return false
+        val stoppedAt = fields[5].toLongOrNull() ?: return false
         owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] = fields[1]
-        workouts[sessionId] = Workout(paused = fields[2] == "1", changedAtMillis = changedAt, stopping = fields[4] == "1")
+        workouts[sessionId] = Workout(paused = fields[2] == "1", changedAtMillis = changedAt, stopping = fields[4] == "1", stoppedAtMillis = stoppedAt)
         return true
     }
 
@@ -286,6 +323,9 @@ class OpenLinkSessions(private val storage: OpenLinkTrustStorage? = null) {
 
         /** How many recorded workouts one app may hold at once; one per device is the usual. */
         const val MAX_WORKOUTS_PER_APP = 4
+
+        /** How long a stopped workout waits for its end before it is taken as ended. */
+        const val STOP_TIMEOUT_MILLIS = 30L * 60 * 1000
 
         /** The longest session id the host takes: the client chooses it, and it is stored. */
         const val MAX_SESSION_ID_LENGTH = 128

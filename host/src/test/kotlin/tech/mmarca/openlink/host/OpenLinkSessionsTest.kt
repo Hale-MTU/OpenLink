@@ -11,7 +11,8 @@ import tech.mmarca.openlink.OpenLinkWorkoutSummary
 
 class OpenLinkSessionsTest {
 
-    private val sessions = OpenLinkSessions()
+    private var now = 1_000L
+    private val sessions = OpenLinkSessions(clock = { now })
 
     private class MapStorage : OpenLinkTrustStorage {
         val map = mutableMapOf<String, String>()
@@ -274,7 +275,7 @@ class OpenLinkSessionsTest {
             map["client.x"] = "trust record"
             map["session.bad"] = "?"
             map["session.short"] = "R\ta"
-            map["session.ok"] = "R\ta\t0\t3\t0"
+            map["session.ok"] = "R\ta\t0\t3\t0\t0"
         }
 
         val sessions = OpenLinkSessions(storage)
@@ -292,5 +293,56 @@ class OpenLinkSessionsTest {
             sessions.reported(stopped("w$i", at = i.toLong()))
         }
         assertThat(storage.map).hasSize(OpenLinkSessions.MAX_FINISHED)
+    }
+
+    @Test
+    fun `a workout ended by a lost capability is not begun again by a replayed start`() {
+        sessions.startRecording(workout("watch"), "a")
+
+        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING)).containsExactly("watch")
+
+        val start = sessions.startRecording(workout("watch"), "a")
+        assertThat(start).isInstanceOf(OpenLinkStart.Ended::class.java)
+        assertThat((start as OpenLinkStart.Ended).last.reason).isEqualTo(OpenLinkRecordingState.REASON_HOST_STOPPED)
+    }
+
+    @Test
+    fun `a stop whose end never comes frees its place after the timeout, and a late end still counts`() {
+        repeat(OpenLinkSessions.MAX_WORKOUTS_PER_APP) {
+            sessions.startRecording(workout("w$it"), "a")
+            sessions.stopRecording("w$it", "a")
+        }
+        now += OpenLinkSessions.STOP_TIMEOUT_MILLIS - 1
+        assertThat(sessions.startRecording(workout("more"), "a")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY))
+
+        now += 1
+        assertThat(sessions.startRecording(workout("more"), "a")).isEqualTo(OpenLinkStart.Begin)
+        assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "w0")).isNull()
+
+        val late = stopped("w0", at = now)
+        assertThat(sessions.reported(late)).isEqualTo("a")
+        assertThat(sessions.startRecording(workout("w0"), "a")).isEqualTo(OpenLinkStart.Ended(late))
+    }
+
+    @Test
+    fun `a stopping workout keeps its timeout through a restart`() {
+        val storage = MapStorage()
+        OpenLinkSessions(storage, clock = { now }).apply {
+            startRecording(workout("watch"), "a")
+            stopRecording("watch", "a")
+        }
+        now += OpenLinkSessions.STOP_TIMEOUT_MILLIS
+
+        val after = OpenLinkSessions(storage, clock = { now })
+        after.startRecording(workout("other"), "a")
+        assertThat(after.owner(OpenLink.CAPABILITY_RECORDING, "watch")).isNull()
+    }
+
+    @Test
+    fun `a refused start does not use up its session id`() {
+        assertThat(sessions.startRecording(workout("watch", device = null), "a"))
+            .isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_NO_DEVICE))
+
+        assertThat(sessions.startRecording(workout("watch"), "a")).isEqualTo(OpenLinkStart.Begin)
     }
 }

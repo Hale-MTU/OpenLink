@@ -491,4 +491,49 @@ class OpenLinkClientCoreTest {
         core.onConnected(again, NoListener)
         assertThat(again.calls).contains("stop:rec")
     }
+
+    @Test
+    fun `a recorded workout ends with the capability, and a later grant does not begin it again`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        core.onDisconnected()
+
+        // Revoked while the app was away: it hears it in the next hello.
+        val noRecording = trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_RECORDING)
+        core.onConnected(FakeHost(noRecording), NoListener)
+
+        assertThat(core.activeRecordings()).isEmpty()
+        assertThat(seen.single().phase).isEqualTo(OpenLinkRecordingPhase.STOPPED)
+        assertThat(seen.single().reason).isEqualTo(OpenLinkRecordingState.REASON_HOST_STOPPED)
+        val regranted = FakeHost(trusted)
+        core.onDisconnected()
+        core.onConnected(regranted, NoListener)
+        assertThat(regranted.calls).doesNotContain("start:rec")
+        job.cancel()
+    }
+
+    @Test
+    fun `a recorded workout asked for while pending is sent once it is granted`() {
+        val host = FakeHost(pending)
+        core.onConnected(host, NoListener)
+        core.startRecording(record)
+
+        core.events.onStateChanged(trusted)
+
+        assertThat(host.calls).contains("start:rec")
+    }
+
+    @Test
+    fun `a workout the host refused can be tried again with the same id`() {
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        core.startRecording(record)
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.FAILED, OpenLinkRecordingState.REASON_BUSY))
+
+        core.startRecording(record)
+
+        assertThat(host.calls.filter { it == "start:rec" }).hasSize(2)
+    }
 }
