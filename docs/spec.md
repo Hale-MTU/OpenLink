@@ -276,8 +276,10 @@ does not build them again, and hands the host app only what changes a workout:
 - A repeated start, pause, resume or stop changes nothing and is not handed on. A repeated start
   is answered with the workout's last reported state, so a client that reconnects learns where
   the workout stands (after a restart of the host that state is unknown until the host app
-  reports again). A start that got `FAILED` uses up nothing: it may be tried again with the
-  same session id.
+  reports again). A start that got `FAILED` before the workout ran, from the library or from the
+  host app (`busy`, `not_connected`), uses up nothing: it may be tried again with the same
+  session id. A workout ran once the host app reported it `RECORDING` or `PAUSED`; its end, a
+  failure included, is remembered like any other.
 - The host holds the state (recording or paused) with the time of its last change, and drops a
   request older than that. Every time is the phone's clock. A pause or resume the host app
   reports from the wearable counts as a change, so a client's older wish that it replays after a

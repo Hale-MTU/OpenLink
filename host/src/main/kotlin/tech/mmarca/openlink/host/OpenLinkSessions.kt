@@ -66,6 +66,11 @@ class OpenLinkSessions(
         /** When the owner stopped it, on this host's clock. */
         val stoppedAtMillis: Long = 0L,
         /**
+         * The host app reported it recording or paused once: a workout ran. A failure before that
+         * is a refused start, which leaves the session id free for another try.
+         */
+        val ran: Boolean = false,
+        /**
          * The last state the host app reported, for an owner that comes back. Not stored: after a
          * restart of the host it is unknown until the host app reports again.
          */
@@ -191,7 +196,8 @@ class OpenLinkSessions(
         val workout = workouts[sessionId] ?: return owner
         if (over) {
             drop(key)
-            remember(sessionId, owner, state)
+            // A start the host app refused (busy, not connected) ran no workout: nothing to keep.
+            if (workout.ran || state.phase == OpenLinkRecordingPhase.STOPPED) remember(sessionId, owner, state)
             publish()
             return owner
         }
@@ -199,6 +205,7 @@ class OpenLinkSessions(
             OpenLinkRecordingPhase.PAUSED, OpenLinkRecordingPhase.RECORDING -> workout.copy(
                 paused = state.phase == OpenLinkRecordingPhase.PAUSED,
                 changedAtMillis = maxOf(workout.changedAtMillis, state.atMillis),
+                ran = true,
                 last = state,
             )
             else -> workout.copy(last = state)
@@ -264,7 +271,10 @@ class OpenLinkSessions(
         val owner = owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] ?: return
         storage?.write(
             storageKey(sessionId),
-            listOf(ACTIVE, owner, flag(workout.paused), workout.changedAtMillis.toString(), flag(workout.stopping), workout.stoppedAtMillis.toString())
+            listOf(
+                ACTIVE, owner, flag(workout.paused), workout.changedAtMillis.toString(), flag(workout.stopping),
+                workout.stoppedAtMillis.toString(), flag(workout.ran),
+            )
                 .joinToString("\t"),
         )
     }
@@ -289,7 +299,7 @@ class OpenLinkSessions(
         val ended = mutableListOf<Triple<String, String, OpenLinkRecordingState>>()
         for ((storedKey, value) in stored) {
             val sessionId = storedKey.removePrefix(KEY_PREFIX)
-            val fields = value.split('\t', limit = 6)
+            val fields = value.split('\t', limit = if (value.startsWith(ACTIVE)) 7 else 6)
             val kept = when (fields[0]) {
                 ACTIVE -> loadWorkout(sessionId, fields)
                 FINISHED -> decodeFinished(sessionId, fields)?.let { ended += Triple(sessionId, fields[1], it) } != null
@@ -303,11 +313,17 @@ class OpenLinkSessions(
     }
 
     private fun loadWorkout(sessionId: String, fields: List<String>): Boolean {
-        if (fields.size != 6 || fields[1].isEmpty()) return false
+        if (fields.size != 7 || fields[1].isEmpty()) return false
         val changedAt = fields[3].toLongOrNull() ?: return false
         val stoppedAt = fields[5].toLongOrNull() ?: return false
         owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] = fields[1]
-        workouts[sessionId] = Workout(paused = fields[2] == "1", changedAtMillis = changedAt, stopping = fields[4] == "1", stoppedAtMillis = stoppedAt)
+        workouts[sessionId] = Workout(
+            paused = fields[2] == "1",
+            changedAtMillis = changedAt,
+            stopping = fields[4] == "1",
+            stoppedAtMillis = stoppedAt,
+            ran = fields[6] == "1",
+        )
         return true
     }
 

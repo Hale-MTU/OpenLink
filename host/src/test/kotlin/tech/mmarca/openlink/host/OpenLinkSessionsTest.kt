@@ -275,7 +275,7 @@ class OpenLinkSessionsTest {
             map["client.x"] = "trust record"
             map["session.bad"] = "?"
             map["session.short"] = "R\ta"
-            map["session.ok"] = "R\ta\t0\t3\t0\t0"
+            map["session.ok"] = "R\ta\t0\t3\t0\t0\t1"
         }
 
         val sessions = OpenLinkSessions(storage)
@@ -344,5 +344,31 @@ class OpenLinkSessionsTest {
             .isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_NO_DEVICE))
 
         assertThat(sessions.startRecording(workout("watch"), "a")).isEqualTo(OpenLinkStart.Begin)
+    }
+
+    private fun failed(id: String, reason: String = OpenLinkRecordingState.REASON_BUSY) =
+        OpenLinkRecordingState(id, "w1", OpenLinkRecordingPhase.FAILED, reason, now)
+
+    @Test
+    fun `a start the host app refused leaves its session id free`() {
+        assertThat(sessions.startRecording(workout("watch"), "a")).isEqualTo(OpenLinkStart.Begin)
+        assertThat(sessions.reported(failed("watch"))).isEqualTo("a")
+
+        assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "watch")).isNull()
+        assertThat(sessions.startRecording(workout("watch"), "a")).isEqualTo(OpenLinkStart.Begin)
+    }
+
+    @Test
+    fun `a workout that ran and then failed is remembered, also across a restart`() {
+        val storage = MapStorage()
+        OpenLinkSessions(storage, clock = { now }).apply {
+            startRecording(workout("watch"), "a")
+            reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 1))
+        }
+        val after = OpenLinkSessions(storage, clock = { now })
+
+        after.reported(failed("watch", OpenLinkRecordingState.REASON_NOT_CONNECTED))
+
+        assertThat(after.startRecording(workout("watch"), "a")).isInstanceOf(OpenLinkStart.Ended::class.java)
     }
 }
