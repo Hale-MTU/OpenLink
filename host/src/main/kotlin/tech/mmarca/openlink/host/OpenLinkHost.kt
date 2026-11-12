@@ -274,14 +274,16 @@ class OpenLinkHost(
 
     private fun endSessions(packageName: String, capabilitiesLost: Set<String>, reason: String, keepDetached: Boolean = false) {
         for (capability in capabilitiesLost) {
-            for (sessionId in sessions.releaseAll(packageName, capability, keepDetached)) {
+            for ((sessionId, stopOwed) in sessions.releaseAll(packageName, capability, keepDetached)) {
                 val caller = OpenLinkCaller(uid = -1, packageName = packageName, signerSha256 = "")
-                runCatching {
-                    when (capability) {
-                        OpenLink.CAPABILITY_RECORDING -> capabilities.stopRecording(caller, sessionId)
-                        OpenLink.CAPABILITY_LIVE -> capabilities.unsubscribeLive(caller, sessionId)
-                    }
-                }.onFailure { Log.w(TAG, "ending a session failed", it) }
+                if (stopOwed) {
+                    runCatching {
+                        when (capability) {
+                            OpenLink.CAPABILITY_RECORDING -> capabilities.stopRecording(caller, sessionId)
+                            OpenLink.CAPABILITY_LIVE -> capabilities.unsubscribeLive(caller, sessionId)
+                        }
+                    }.onFailure { Log.w(TAG, "ending a session failed", it) }
+                }
                 if (capability == OpenLink.CAPABILITY_RECORDING) {
                     // To the owner whatever it may still do: it has just lost the capability, and
                     // must hear that its recording ended.

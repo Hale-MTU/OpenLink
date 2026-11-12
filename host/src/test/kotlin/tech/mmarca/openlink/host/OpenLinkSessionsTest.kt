@@ -16,8 +16,9 @@ class OpenLinkSessionsTest {
 
     private class MapStorage : OpenLinkTrustStorage {
         val map = mutableMapOf<String, String>()
+        var writes = 0
         override fun read(): Map<String, String> = map.toMap()
-        override fun write(key: String, value: String) { map[key] = value }
+        override fun write(key: String, value: String) { map[key] = value; writes++ }
         override fun remove(key: String) { map.remove(key) }
     }
 
@@ -47,7 +48,7 @@ class OpenLinkSessionsTest {
         sessions.startRecording(stream("s1"), "a")
         sessions.claim(OpenLink.CAPABILITY_LIVE, "s2", "b")
 
-        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_LIVE)).containsExactly("s1")
+        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_LIVE).map { it.sessionId }).containsExactly("s1")
         assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "s1")).isEqualTo("a")
         assertThat(sessions.owner(OpenLink.CAPABILITY_LIVE, "s2")).isEqualTo("b")
     }
@@ -72,10 +73,10 @@ class OpenLinkSessionsTest {
         sessions.startRecording(stream("plain"), "a")
         sessions.startRecording(workout("watch"), "a")
 
-        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING, keepDetached = true)).containsExactly("plain")
+        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING, keepDetached = true).map { it.sessionId }).containsExactly("plain")
         assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "watch")).isEqualTo("a")
         // Losing the capability ends it too.
-        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING)).containsExactly("watch")
+        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING).map { it.sessionId }).containsExactly("watch")
         assertThat(sessions.active.value).isEmpty()
     }
 
@@ -299,7 +300,7 @@ class OpenLinkSessionsTest {
     fun `a workout ended by a lost capability is not begun again by a replayed start`() {
         sessions.startRecording(workout("watch"), "a")
 
-        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING)).containsExactly("watch")
+        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING).map { it.sessionId }).containsExactly("watch")
 
         val start = sessions.startRecording(workout("watch"), "a")
         assertThat(start).isInstanceOf(OpenLinkStart.Ended::class.java)
@@ -370,5 +371,62 @@ class OpenLinkSessionsTest {
         after.reported(failed("watch", OpenLinkRecordingState.REASON_NOT_CONNECTED))
 
         assertThat(after.startRecording(workout("watch"), "a")).isInstanceOf(OpenLinkStart.Ended::class.java)
+    }
+
+    @Test
+    fun `a report older than the last change does not undo it`() {
+        sessions.startRecording(workout("watch", at = 0), "a")
+        assertThat(sessions.control("watch", "a", pause = true, atMillis = 100)).isTrue()
+        // The host app's late start confirmation, from before the pause.
+        sessions.reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 90))
+
+        assertThat(sessions.control("watch", "a", pause = false, atMillis = 110)).isTrue()
+    }
+
+    @Test
+    fun `a report that repeats the state is no change, so an older wish still counts`() {
+        sessions.startRecording(workout("watch", at = 0), "a")
+        sessions.reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 10))
+        // Reported again (the device came back) after the phone's pause at 100, sent late.
+        sessions.reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 120))
+
+        assertThat(sessions.control("watch", "a", pause = true, atMillis = 100)).isTrue()
+    }
+
+    @Test
+    fun `a repeated start of a stream session is handed on again`() {
+        assertThat(sessions.startRecording(stream("plain"), "a")).isEqualTo(OpenLinkStart.Begin)
+        sessions.reported(failed("plain", OpenLinkRecordingState.REASON_NOT_CONNECTED))
+
+        assertThat(sessions.startRecording(stream("plain"), "a")).isEqualTo(OpenLinkStart.Begin)
+        assertThat(sessions.startRecording(stream("plain"), "b")).isEqualTo(OpenLinkStart.Refused)
+    }
+
+    @Test
+    fun `a stopping workout ended by a lost capability is not stopped again`() {
+        sessions.startRecording(workout("stopping"), "a")
+        sessions.stopRecording("stopping", "a")
+        sessions.startRecording(workout("running"), "a")
+        sessions.startRecording(stream("plain"), "a")
+
+        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING)).containsExactly(
+            OpenLinkSessions.Released("stopping", stopOwed = false),
+            OpenLinkSessions.Released("running", stopOwed = true),
+            OpenLinkSessions.Released("plain", stopOwed = true),
+        )
+    }
+
+    @Test
+    fun `a report that changes nothing kept is not written`() {
+        val storage = MapStorage()
+        val sessions = OpenLinkSessions(storage)
+        sessions.startRecording(workout("watch"), "a")
+        sessions.reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 1))
+        val writes = storage.writes
+
+        sessions.reported(state("watch", OpenLinkRecordingPhase.STARTING, at = 2))
+        sessions.reported(state("watch", OpenLinkRecordingPhase.RECORDING, at = 3))
+
+        assertThat(storage.writes).isEqualTo(writes)
     }
 }

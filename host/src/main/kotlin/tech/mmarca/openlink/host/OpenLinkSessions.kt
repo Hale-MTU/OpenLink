@@ -116,7 +116,9 @@ class OpenLinkSessions(
         if (sessionId.isBlank() || sessionId.length > MAX_SESSION_ID_LENGTH) return OpenLinkStart.Refused
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
         when (owners[key]) {
-            packageName -> return OpenLinkStart.Already(workouts[sessionId]?.last)
+            // A stream session's repeat goes to the host app again: one that failed (its device
+            // gone) is retried, as in version 1.
+            packageName -> return workouts[sessionId]?.let { OpenLinkStart.Already(it.last) } ?: OpenLinkStart.Begin
             null -> Unit
             else -> return OpenLinkStart.Refused
         }
@@ -201,41 +203,55 @@ class OpenLinkSessions(
             publish()
             return owner
         }
-        workouts[sessionId] = when (state.phase) {
-            OpenLinkRecordingPhase.PAUSED, OpenLinkRecordingPhase.RECORDING -> workout.copy(
-                paused = state.phase == OpenLinkRecordingPhase.PAUSED,
-                changedAtMillis = maxOf(workout.changedAtMillis, state.atMillis),
-                ran = true,
-                last = state,
-            )
+        val updated = when (state.phase) {
+            OpenLinkRecordingPhase.PAUSED, OpenLinkRecordingPhase.RECORDING -> {
+                val paused = state.phase == OpenLinkRecordingPhase.PAUSED
+                // Only a newer report that flips it is a change: an older one (a late start
+                // confirmation) does not undo the owner's pause, and a repeat (the device came
+                // back) does not make the owner's earlier wish older than it.
+                val changed = paused != workout.paused && state.atMillis >= workout.changedAtMillis
+                workout.copy(
+                    paused = if (changed) paused else workout.paused,
+                    changedAtMillis = if (changed) state.atMillis else workout.changedAtMillis,
+                    ran = true,
+                    last = state,
+                )
+            }
             else -> workout.copy(last = state)
         }
-        save(sessionId)
+        workouts[sessionId] = updated
+        // `last` is not stored: write only what a restart keeps.
+        if (updated.copy(last = null) != workout.copy(last = null)) save(sessionId)
         return owner
     }
 
     @Synchronized
     fun owner(capability: String, sessionId: String): String? = owners[Key(capability, sessionId)]
 
+    /** A session [releaseAll] ended; [stopOwed] if the host app has not been handed its stop yet. */
+    data class Released(val sessionId: String, val stopOwed: Boolean)
+
     /**
-     * Removes and returns the session ids [packageName] owns under [capability]; with
+     * Removes and returns the sessions [packageName] owns under [capability]; with
      * [keepDetached], its recorded workouts stay. A recorded workout that ends here (its owner
      * lost the capability) is remembered as stopped by the host, so a start its owner replays
-     * once it has the capability again does not begin a new workout.
+     * once it has the capability again does not begin a new workout. One the owner stopped
+     * already owes the host app no second stop.
      */
     @Synchronized
-    fun releaseAll(packageName: String, capability: String, keepDetached: Boolean = false): List<String> {
+    fun releaseAll(packageName: String, capability: String, keepDetached: Boolean = false): List<Released> {
         val keys = owners.filter { (key, owner) ->
             owner == packageName && key.capability == capability &&
                 !(keepDetached && key.capability == OpenLink.CAPABILITY_RECORDING && key.sessionId in workouts)
         }.keys.toList()
-        for (key in keys) {
-            val recorded = key.capability == OpenLink.CAPABILITY_RECORDING && key.sessionId in workouts
+        val released = keys.map { key ->
+            val workout = if (key.capability == OpenLink.CAPABILITY_RECORDING) workouts[key.sessionId] else null
             drop(key)
-            if (recorded) remember(key.sessionId, packageName, hostStopped(key.sessionId))
+            if (workout != null) remember(key.sessionId, packageName, hostStopped(key.sessionId))
+            Released(key.sessionId, stopOwed = workout?.stopping != true)
         }
         if (keys.isNotEmpty()) publish()
-        return keys.map { it.sessionId }
+        return released
     }
 
     /**
