@@ -207,7 +207,8 @@ class OpenLinkClientCore(
      * changed it; keys OpenLink does not know and values that do not fit are dropped here.
      */
     fun setSettings(settings: OpenLinkSettings) {
-        pendingSettings = pendingSettings.merge(settings.valid(clock()))
+        // The app's later call wins a tie: it is the user's last choice.
+        pendingSettings = settings.valid(clock()).merge(pendingSettings)
         flushSettings()
     }
 

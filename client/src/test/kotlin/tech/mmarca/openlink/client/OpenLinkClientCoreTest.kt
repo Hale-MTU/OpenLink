@@ -57,7 +57,8 @@ class OpenLinkClientCoreTest {
         override fun subscribeLive(subscription: OpenLinkLiveSubscription?) { calls += "live:${subscription?.sessionId}" }
         override fun unsubscribeLive(sessionId: String?) { calls += "unlive:$sessionId" }
         var hostSettings = OpenLinkSettings.EMPTY
-        override fun setSettings(settings: OpenLinkSettings?) { calls += "setSettings:${settings?.entries?.keys?.sorted()}" }
+        var sentSettings: OpenLinkSettings? = null
+        override fun setSettings(settings: OpenLinkSettings?) { sentSettings = settings; calls += "setSettings:${settings?.entries?.keys?.sorted()}" }
         override fun getSettings(): OpenLinkSettings = hostSettings
         override fun asBinder(): IBinder? = null
     }
@@ -77,6 +78,18 @@ class OpenLinkClientCoreTest {
     private val pending = OpenLinkState(trust = OpenLinkTrust.PENDING)
     private var now = 100L
     private val core = OpenLinkClientCore(OpenLink.ALL_CAPABILITIES, "2.17.0", clock = { now })
+
+    @Test
+    fun `the app's later change of a setting wins, also at the same time`() {
+        core.onStarting()
+        core.setSettings(OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50))
+        core.setSettings(OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(9_000.0), 50))
+        val host = FakeHost(trusted)
+
+        core.onConnected(host, NoListener)
+
+        assertThat(host.sentSettings?.number(OpenLinkSettingKeys.GOAL_STEPS)).isEqualTo(9_000.0)
+    }
 
     @Test
     fun `settings go to a version 3 host once, only the keys OpenLink knows`() {

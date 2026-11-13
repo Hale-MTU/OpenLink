@@ -225,11 +225,7 @@ class OpenLinkHost(
      */
     fun publishSettings(settings: OpenLinkSettings) {
         val valid = settings.valid(System.currentTimeMillis())
-        forEachListener { listener, caller ->
-            if (core.versionOf(caller.packageName) >= OpenLink.SETTINGS_VERSION && core.allows(caller, OpenLink.CAPABILITY_SETTINGS)) {
-                listener.onSettingsChanged(valid)
-            }
-        }
+        broadcast(OpenLink.CAPABILITY_SETTINGS, minVersion = OpenLink.SETTINGS_VERSION) { it.onSettingsChanged(valid) }
     }
 
     fun publishDevices(devices: List<OpenLinkDevice>) =
