@@ -2,6 +2,8 @@ package tech.mmarca.openlink.host
 
 import android.app.PendingIntent
 import android.os.Binder
+import android.os.Handler
+import android.os.Looper
 import android.os.RemoteCallbackList
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,11 +14,13 @@ import kotlinx.coroutines.flow.update
 import tech.mmarca.openlink.IOpenLinkHost
 import tech.mmarca.openlink.IOpenLinkListener
 import tech.mmarca.openlink.OpenLink
+import tech.mmarca.openlink.OpenLinkDataWritten
 import tech.mmarca.openlink.OpenLinkDevice
 import tech.mmarca.openlink.OpenLinkHello
 import tech.mmarca.openlink.OpenLinkLiveBatch
 import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
+import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
@@ -35,8 +39,22 @@ class OpenLinkHost(
     private val capabilities: OpenLinkHostCapabilities,
     /** The host's consent screen for a pending client; null if the host has none. */
     private val consentIntent: (packageName: String) -> PendingIntent?,
+    /**
+     * Where recordings a wearable records itself are kept across a restart of the host's
+     * process (it may be the trust store's own storage). Null: in memory only.
+     */
+    sessionStorage: OpenLinkTrustStorage? = null,
 ) {
-    private val sessions = OpenLinkSessions()
+    private val sessions = OpenLinkSessions(sessionStorage)
+
+    /**
+     * Held from a session decision to the word it sends, so what a client hears of a recording
+     * (a reply to its start, a report from the host app, an end) comes in the order it was decided.
+     */
+    private val recordingLock = Any()
+
+    private val stopTimer = Handler(Looper.getMainLooper())
+    private val checkStops = Runnable { expireStops() }
 
     private val _connected = MutableStateFlow<Set<String>>(emptySet())
 
@@ -63,6 +81,8 @@ class OpenLinkHost(
             endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES - kept, OpenLinkRecordingState.REASON_HOST_STOPPED)
             broadcastTo(packageName) { listener, caller -> listener.onStateChanged(stateFor(caller)) }
         }
+        // Stopped workouts kept through a restart wait for their end from here.
+        scheduleStopCheck()
     }
 
     val binder: IOpenLinkHost.Stub = object : IOpenLinkHost.Stub() {
@@ -116,15 +136,48 @@ class OpenLinkHost(
             gated(OpenLink.CAPABILITY_DEVICES) { capabilities.requestSync(it, deviceId ?: return@gated) }
 
         override fun startRecording(request: OpenLinkRecordingRequest?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
-            val sessionId = request?.sessionId?.takeIf { it.isNotBlank() } ?: return@gated
-            if (sessions.claim(OpenLink.CAPABILITY_RECORDING, sessionId, caller.packageName)) {
-                capabilities.startRecording(caller, request)
+            request ?: return@gated
+            // A workout whose end is overdue frees its place before the start counts places.
+            if (request.mode == OpenLinkRecordingMode.RECORD) expireStops()
+            val start = synchronized(recordingLock) {
+                sessions.startRecording(request, caller.packageName).also { start ->
+                    when (start) {
+                        OpenLinkStart.Begin, OpenLinkStart.Refused -> Unit
+                        // A replay after a reconnect: where the workout stands, if the host app said.
+                        is OpenLinkStart.Already -> start.last?.let { tellRecording(caller.packageName, it) }
+                        // A replay of a recording that ended while the client was away: start nothing.
+                        is OpenLinkStart.Ended -> tellRecording(caller.packageName, start.last)
+                        is OpenLinkStart.Failed -> tellRecording(
+                            caller.packageName,
+                            OpenLinkRecordingState(request.sessionId, request.deviceId.orEmpty(), OpenLinkRecordingPhase.FAILED, start.reason, System.currentTimeMillis()),
+                        )
+                    }
+                }
+            }
+            // Outside the lock: the host app may report from within.
+            if (start == OpenLinkStart.Begin) capabilities.startRecording(caller, request)
+        }
+
+        override fun pauseRecording(sessionId: String?, atMillis: Long) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
+            if (sessionId != null && sessions.control(sessionId, caller.packageName, pause = true, atMillis = atMillis)) {
+                capabilities.pauseRecording(caller, sessionId, atMillis)
+            }
+        }
+
+        override fun resumeRecording(sessionId: String?, atMillis: Long) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
+            if (sessionId != null && sessions.control(sessionId, caller.packageName, pause = false, atMillis = atMillis)) {
+                capabilities.resumeRecording(caller, sessionId, atMillis)
             }
         }
 
         override fun stopRecording(sessionId: String?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
-            if (sessionId != null && sessions.release(OpenLink.CAPABILITY_RECORDING, sessionId, caller.packageName)) {
+            sessionId ?: return@gated
+            if (sessions.stopRecording(sessionId, caller.packageName)) {
+                scheduleStopCheck()
                 capabilities.stopRecording(caller, sessionId)
+            } else {
+                // A stop for a session the caller does not hold still gets an end: its client waits for one.
+                synchronized(recordingLock) { sessions.unheldStop(sessionId, caller.packageName)?.let { tellRecording(caller.packageName, it) } }
             }
         }
 
@@ -153,14 +206,48 @@ class OpenLinkHost(
     fun publishRecordingState(state: OpenLinkRecordingState) {
         // The session stays the client's until it stops it or loses the capability: a device
         // that dropped out may come back within the same recording.
-        val owner = sessions.owner(OpenLink.CAPABILITY_RECORDING, state.sessionId) ?: return
-        broadcastTo(owner, OpenLink.CAPABILITY_RECORDING) { listener, _ -> listener.onRecordingStateChanged(state) }
+        // A recorded workout's state is taken over, and its end remembered, in the same step.
+        synchronized(recordingLock) {
+            val owner = sessions.reported(state) ?: return
+            tellRecording(owner, state)
+        }
+    }
+
+    /**
+     * The host wrote new data to Health Connect (version 2). To every client trusted with
+     * devices that speaks version 2; an older one has no such method.
+     */
+    fun publishDataWritten(written: OpenLinkDataWritten) {
+        if (written.recordTypes.isEmpty()) return
+        broadcast(OpenLink.CAPABILITY_DEVICES, minVersion = 2) { it.onDataWritten(written) }
     }
 
     fun publishLive(batch: OpenLinkLiveBatch) {
         if (batch.samples.isEmpty()) return
         val owner = sessions.owner(OpenLink.CAPABILITY_LIVE, batch.sessionId) ?: return
         broadcastTo(owner, OpenLink.CAPABILITY_LIVE) { listener, _ -> listener.onLiveSamples(batch) }
+    }
+
+    /** Ends the stopped workouts whose end is overdue, tells their owners, and waits for the next. */
+    private fun expireStops() {
+        synchronized(recordingLock) {
+            sessions.expireStops().forEach { (owner, end) -> tellRecording(owner, end) }
+        }
+        scheduleStopCheck()
+    }
+
+    private fun scheduleStopCheck() {
+        stopTimer.removeCallbacks(checkStops)
+        val deadline = sessions.nextStopDeadline() ?: return
+        // The handler counts uptime, which stands still in deep sleep, and the deadline is on the
+        // wall clock: look again at least every STOP_CHECK_MILLIS, so an end overdue during sleep
+        // comes soon after the phone wakes.
+        stopTimer.postDelayed(checkStops, (deadline - System.currentTimeMillis()).coerceIn(0L, STOP_CHECK_MILLIS))
+    }
+
+    private fun tellRecording(packageName: String, state: OpenLinkRecordingState) {
+        val sent = state.forVersion(core.versionOf(packageName))
+        broadcastTo(packageName, OpenLink.CAPABILITY_RECORDING) { listener, _ -> listener.onRecordingStateChanged(sent) }
     }
 
     /** Whether any client is bound with a listener. */
@@ -185,7 +272,7 @@ class OpenLinkHost(
 
     /** [packageName] went away: nothing keeps running for it, and its "last connected" moves. */
     private fun left(packageName: String) {
-        endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED)
+        endSessions(packageName, OpenLinkSessions.SESSION_CAPABILITIES, OpenLinkRecordingState.REASON_HOST_STOPPED, keepDetached = true)
         if (packageName in _connected.getAndUpdate { it - packageName }) core.onDisconnected(packageName)
     }
 
@@ -226,16 +313,18 @@ class OpenLinkHost(
         consentIntent = if (decision.trust == OpenLinkTrust.PENDING) consentIntent(packageName) else null,
     )
 
-    private fun endSessions(packageName: String, capabilitiesLost: Set<String>, reason: String) {
+    private fun endSessions(packageName: String, capabilitiesLost: Set<String>, reason: String, keepDetached: Boolean = false) {
         for (capability in capabilitiesLost) {
-            for (sessionId in sessions.releaseAll(packageName, capability)) {
+            for ((sessionId, stopOwed) in sessions.releaseAll(packageName, capability, keepDetached)) {
                 val caller = OpenLinkCaller(uid = -1, packageName = packageName, signerSha256 = "")
-                runCatching {
-                    when (capability) {
-                        OpenLink.CAPABILITY_RECORDING -> capabilities.stopRecording(caller, sessionId)
-                        OpenLink.CAPABILITY_LIVE -> capabilities.unsubscribeLive(caller, sessionId)
-                    }
-                }.onFailure { Log.w(TAG, "ending a session failed", it) }
+                if (stopOwed) {
+                    runCatching {
+                        when (capability) {
+                            OpenLink.CAPABILITY_RECORDING -> capabilities.stopRecording(caller, sessionId)
+                            OpenLink.CAPABILITY_LIVE -> capabilities.unsubscribeLive(caller, sessionId)
+                        }
+                    }.onFailure { Log.w(TAG, "ending a session failed", it) }
+                }
                 if (capability == OpenLink.CAPABILITY_RECORDING) {
                     // To the owner whatever it may still do: it has just lost the capability, and
                     // must hear that its recording ended.
@@ -249,9 +338,10 @@ class OpenLinkHost(
         }
     }
 
-    private fun broadcast(capability: String, send: (IOpenLinkListener) -> Unit) {
+    /** To every client trusted with [capability] that negotiated at least [minVersion]. */
+    private fun broadcast(capability: String, minVersion: Int = 1, send: (IOpenLinkListener) -> Unit) {
         forEachListener { listener, caller ->
-            if (core.allows(caller, capability)) send(listener)
+            if (core.allows(caller, capability) && core.versionOf(caller.packageName) >= minVersion) send(listener)
         }
     }
 
@@ -277,5 +367,8 @@ class OpenLinkHost(
 
     private companion object {
         const val TAG = "OpenLinkHost"
+
+        /** The longest wait for an overdue stop, in uptime. */
+        const val STOP_CHECK_MILLIS = 60_000L
     }
 }
