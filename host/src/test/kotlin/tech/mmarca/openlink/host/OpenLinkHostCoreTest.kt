@@ -107,6 +107,24 @@ class OpenLinkHostCoreTest {
     }
 
     @Test
+    fun `the version a client negotiated is remembered per client`() {
+        val core = core()
+        assertThat(core.versionOf(vitals.packageName)).isEqualTo(1)
+
+        core.hello(vitals, OpenLinkHello(protocolVersion = 1, requestedCapabilities = all.requestedCapabilities))
+        assertThat(core.versionOf(vitals.packageName)).isEqualTo(1)
+        assertThat(core.decision(vitals).protocolVersion).isEqualTo(1)
+
+        core.hello(vitals, OpenLinkHello(protocolVersion = 2, requestedCapabilities = all.requestedCapabilities))
+        assertThat(core.versionOf(vitals.packageName)).isEqualTo(2)
+        assertThat(core.versionOf(stranger.packageName)).isEqualTo(1)
+
+        core.hello(stranger, OpenLinkHello(protocolVersion = 2))
+        core.forget(stranger.packageName)
+        assertThat(core.versionOf(stranger.packageName)).isEqualTo(1)
+    }
+
+    @Test
     fun `hello, leaving and a received profile are remembered across a restart, without a trust change`() {
         val changes = mutableListOf<String>()
         val core = core().apply { onTrustChanged = { packageName, _, _ -> changes += packageName } }
