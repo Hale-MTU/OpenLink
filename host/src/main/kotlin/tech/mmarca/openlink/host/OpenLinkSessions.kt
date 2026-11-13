@@ -82,6 +82,13 @@ class OpenLinkSessions(
 
     private val owners = linkedMapOf<Key, String>()
 
+    /**
+     * When each recording session was given to its owner, on this host's clock. The host app
+     * names a session by its id only: a report older than this is about an ended workout that
+     * had the same id before.
+     */
+    private val begunAt = mutableMapOf<String, Long>()
+
     /** The recorded workouts held now, by session id. */
     private val workouts = mutableMapOf<String, Workout>()
 
@@ -120,7 +127,9 @@ class OpenLinkSessions(
         when (owners[key]) {
             // A stream session's repeat goes to the host app again: one that failed (its device
             // gone) is retried, as in version 1.
-            packageName -> return workouts[sessionId]?.let { OpenLinkStart.Already(it.last) } ?: OpenLinkStart.Begin
+            packageName -> return workouts[sessionId]?.let { OpenLinkStart.Already(it.last) }
+                // A recorded workout under the id of the caller's own stream session: not taken.
+                ?: if (request.mode == OpenLinkRecordingMode.RECORD) OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY) else OpenLinkStart.Begin
             null -> Unit
             else -> return OpenLinkStart.Refused
         }
@@ -132,6 +141,7 @@ class OpenLinkSessions(
             workouts[sessionId] = Workout(changedAtMillis = request.startedAtMillis)
         }
         owners[key] = packageName
+        begunAt[sessionId] = clock()
         save(sessionId)
         publish()
         return OpenLinkStart.Begin
@@ -171,6 +181,19 @@ class OpenLinkSessions(
         return true
     }
 
+    /**
+     * A stop from [packageName] for [sessionId] that it does not hold: the end to tell it, so a
+     * client that waits for its end hears one. Its remembered end if the workout ended (while it
+     * was away), else `STOPPED` as asked (the host never began it: another app holds the id, or
+     * the start was never taken). Null if it holds the session: the stop was a repeat.
+     */
+    @Synchronized
+    fun unheldStop(sessionId: String, packageName: String): OpenLinkRecordingState? {
+        if (owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] == packageName) return null
+        return finished[Done(packageName, sessionId)]
+            ?: OpenLinkRecordingState(sessionId, "", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, clock())
+    }
+
     @Synchronized
     fun release(capability: String, sessionId: String, packageName: String): Boolean {
         val key = Key(capability, sessionId)
@@ -184,14 +207,18 @@ class OpenLinkSessions(
      * The host app reported [state]: returns the owner to tell, or null if no one holds the
      * session. A pause or resume on the watch changes the workout as one from the owner would;
      * an end makes it over for good, remembered as ended. A later end for an ended one (a fuller
-     * summary) replaces what is remembered and reaches its owner too.
+     * summary) replaces what is remembered and reaches its owner too, also once another app
+     * took the same session id: a report older than that app's start is not about its session.
      */
     @Synchronized
     fun reported(state: OpenLinkRecordingState): String? {
         val sessionId = state.sessionId
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
-        val over = state.phase == OpenLinkRecordingPhase.STOPPED || state.phase == OpenLinkRecordingPhase.FAILED
-        val owner = owners[key] ?: run {
+        val over = state.phase.isOver
+        val current = owners[key]?.takeUnless {
+            state.atMillis < (begunAt[sessionId] ?: Long.MIN_VALUE) && finished.keys.any { it.sessionId == sessionId }
+        }
+        val owner = current ?: run {
             if (!over) return null
             // The host app names the session only: the latest that ended under this id.
             val ended = finished.keys.lastOrNull { it.sessionId == sessionId }?.owner ?: return null
@@ -290,9 +317,9 @@ class OpenLinkSessions(
 
     private fun drop(key: Key) {
         owners.remove(key)
-        if (key.capability == OpenLink.CAPABILITY_RECORDING && workouts.remove(key.sessionId) != null) {
-            storage?.remove(storageKey(key.sessionId))
-        }
+        if (key.capability != OpenLink.CAPABILITY_RECORDING) return
+        begunAt.remove(key.sessionId)
+        if (workouts.remove(key.sessionId) != null) storage?.remove(storageKey(key.sessionId))
     }
 
     /** Writes the recorded workout [sessionId], if it is one, to the storage. */
@@ -303,7 +330,7 @@ class OpenLinkSessions(
             storageKey(sessionId),
             listOf(
                 ACTIVE, owner, flag(workout.paused), workout.changedAtMillis.toString(), flag(workout.stopping),
-                workout.stoppedAtMillis.toString(), flag(workout.ran),
+                workout.stoppedAtMillis.toString(), flag(workout.ran), begunAt[sessionId]?.toString().orEmpty(),
             )
                 .joinToString("\t"),
         )
@@ -331,7 +358,7 @@ class OpenLinkSessions(
         for ((storedKey, value) in stored) {
             val kept = when {
                 storedKey.startsWith(KEY_PREFIX) ->
-                    value.startsWith(ACTIVE) && loadWorkout(storedKey.removePrefix(KEY_PREFIX), value.split('\t', limit = 7))
+                    value.startsWith(ACTIVE) && loadWorkout(storedKey.removePrefix(KEY_PREFIX), value.split('\t', limit = 8))
                 storedKey.startsWith(ENDED_PREFIX) -> {
                     // The owner, a package name, holds no "/": the session id is all after the first.
                     val rest = storedKey.removePrefix(ENDED_PREFIX)
@@ -351,10 +378,12 @@ class OpenLinkSessions(
     }
 
     private fun loadWorkout(sessionId: String, fields: List<String>): Boolean {
-        if (fields.size != 7 || fields[1].isEmpty()) return false
+        // Seven fields: written before the start time was kept.
+        if (fields.size !in 7..8 || fields[1].isEmpty()) return false
         val changedAt = fields[3].toLongOrNull() ?: return false
         val stoppedAt = fields[5].toLongOrNull() ?: return false
         owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] = fields[1]
+        fields.getOrNull(7)?.toLongOrNull()?.let { begunAt[sessionId] = it }
         workouts[sessionId] = Workout(
             paused = fields[2] == "1",
             changedAtMillis = changedAt,
@@ -412,7 +441,7 @@ class OpenLinkSessions(
                     it.heartRateRecovery2MinBpm?.toString().orEmpty(),
                 ).joinToString(";")
             }.orEmpty()
-            return listOf(FINISHED, owner, last.phase.name, last.atMillis.toString(), last.reason.orEmpty(), summary + "\t" + last.deviceId)
+            return listOf(FINISHED, owner, last.phase.name, last.atMillis.toString(), last.reason.orEmpty().replace('\t', ' '), summary + "\t" + last.deviceId)
                 .joinToString("\t")
         }
 

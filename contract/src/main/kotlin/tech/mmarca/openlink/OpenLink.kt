@@ -39,7 +39,12 @@ enum class OpenLinkConnection { CONNECTED, DISCONNECTED, UNKNOWN }
  * The states a recording session on a wearable goes through. [PAUSED] exists from version 2;
  * a host never reports it to a client that negotiated version 1, which would read it as a failure.
  */
-enum class OpenLinkRecordingPhase { STARTING, RECORDING, PAUSED, STOPPED, FAILED }
+enum class OpenLinkRecordingPhase {
+    STARTING, RECORDING, PAUSED, STOPPED, FAILED;
+
+    /** The session is over: nothing follows but, for a recorded workout, a fuller end. */
+    val isOver: Boolean get() = this == STOPPED || this == FAILED
+}
 
 /**
  * What a recording session does on the host (version 2). [STREAM] keeps the wearable's live

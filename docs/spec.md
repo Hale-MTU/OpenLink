@@ -272,7 +272,8 @@ does not build them again, and hands the host app only what changes a workout:
 
 - A request in `RECORD` mode needs a `deviceId`; without one it gets `FAILED`, reason
   `no_device`. A session id is at most 128 characters, and one app holds at most 4 recorded
-  workouts at once (more get `FAILED`, reason `busy`).
+  workouts at once (more get `FAILED`, reason `busy`, as does a `RECORD` start under the id of
+  the app's own stream session).
 - A repeated start, pause, resume or stop changes nothing and is not handed on. A repeated start
   is answered with the workout's last reported state, so a client that reconnects learns where
   the workout stands (after a restart of the host that state is unknown until the host app
@@ -301,7 +302,11 @@ does not build them again, and hands the host app only what changes a workout:
   not begin a new workout. The client library, too, drops a recorded workout a host had once it
   hears the capability is gone, and reports it `STOPPED`, `host_stopped`; so too one it stopped
   whose end it has not heard.
-- An ended workout is remembered for its owner: another app may use the same session id.
+- An ended workout is remembered for its owner: another app may use the same session id. A
+  report older than that app's start is about the ended workout, so its fuller end still reaches
+  its owner and does not end the other app's.
+- A stop for a session the caller does not hold is answered with its end: the remembered one if
+  the workout ended, else `STOPPED`, `stopped_by_client` (the host never began it).
 - Only the owner may pause, resume or stop it, and it outlives its owner's binding (above).
 
 What the host app enforces, because it knows its devices: one workout per device (a request for
@@ -311,7 +316,8 @@ stop with the reason `stopped_on_device`), so the owner holds no state of its ow
 disagree with the host's.
 
 The client library delivers what it was asked while it was not connected, since such a session
-outlives the binding: a stop of a `RECORD` session is kept until the host has it, and the last
+outlives the binding: a stop of a `RECORD` session is kept until the host has it (one no host
+was sent yet ends at once, `STOPPED`, `stopped_by_client`), and the last
 pause or resume is sent again, with the time it was asked, after the start it replays, unless the
 host has since reported a newer state. It takes in the end of a workout it stopped, and a fuller
 end of one that ended, for the last 16 such workouts; in memory only, so a later summary for a

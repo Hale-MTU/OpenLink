@@ -20,6 +20,7 @@ import tech.mmarca.openlink.OpenLinkHello
 import tech.mmarca.openlink.OpenLinkLiveBatch
 import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
+import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
@@ -137,7 +138,7 @@ class OpenLinkHost(
         override fun startRecording(request: OpenLinkRecordingRequest?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
             request ?: return@gated
             // A workout whose end is overdue frees its place before the start counts places.
-            expireStops()
+            if (request.mode == OpenLinkRecordingMode.RECORD) expireStops()
             val start = synchronized(recordingLock) {
                 sessions.startRecording(request, caller.packageName).also { start ->
                     when (start) {
@@ -170,9 +171,13 @@ class OpenLinkHost(
         }
 
         override fun stopRecording(sessionId: String?) = gated(OpenLink.CAPABILITY_RECORDING) { caller ->
-            if (sessionId != null && sessions.stopRecording(sessionId, caller.packageName)) {
+            sessionId ?: return@gated
+            if (sessions.stopRecording(sessionId, caller.packageName)) {
                 scheduleStopCheck()
                 capabilities.stopRecording(caller, sessionId)
+            } else {
+                // A stop for a session the caller does not hold still gets an end: its client waits for one.
+                synchronized(recordingLock) { sessions.unheldStop(sessionId, caller.packageName)?.let { tellRecording(caller.packageName, it) } }
             }
         }
 
@@ -214,11 +219,7 @@ class OpenLinkHost(
      */
     fun publishDataWritten(written: OpenLinkDataWritten) {
         if (written.recordTypes.isEmpty()) return
-        forEachListener { listener, caller ->
-            if (core.versionOf(caller.packageName) >= 2 && core.allows(caller, OpenLink.CAPABILITY_DEVICES)) {
-                listener.onDataWritten(written)
-            }
-        }
+        broadcast(OpenLink.CAPABILITY_DEVICES, minVersion = 2) { it.onDataWritten(written) }
     }
 
     fun publishLive(batch: OpenLinkLiveBatch) {
@@ -238,7 +239,10 @@ class OpenLinkHost(
     private fun scheduleStopCheck() {
         stopTimer.removeCallbacks(checkStops)
         val deadline = sessions.nextStopDeadline() ?: return
-        stopTimer.postDelayed(checkStops, (deadline - System.currentTimeMillis()).coerceAtLeast(0L))
+        // The handler counts uptime, which stands still in deep sleep, and the deadline is on the
+        // wall clock: look again at least every STOP_CHECK_MILLIS, so an end overdue during sleep
+        // comes soon after the phone wakes.
+        stopTimer.postDelayed(checkStops, (deadline - System.currentTimeMillis()).coerceIn(0L, STOP_CHECK_MILLIS))
     }
 
     private fun tellRecording(packageName: String, state: OpenLinkRecordingState) {
@@ -334,9 +338,10 @@ class OpenLinkHost(
         }
     }
 
-    private fun broadcast(capability: String, send: (IOpenLinkListener) -> Unit) {
+    /** To every client trusted with [capability] that negotiated at least [minVersion]. */
+    private fun broadcast(capability: String, minVersion: Int = 1, send: (IOpenLinkListener) -> Unit) {
         forEachListener { listener, caller ->
-            if (core.allows(caller, capability)) send(listener)
+            if (core.allows(caller, capability) && core.versionOf(caller.packageName) >= minVersion) send(listener)
         }
     }
 
@@ -362,5 +367,8 @@ class OpenLinkHost(
 
     private companion object {
         const val TAG = "OpenLinkHost"
+
+        /** The longest wait for an overdue stop, in uptime. */
+        const val STOP_CHECK_MILLIS = 60_000L
     }
 }

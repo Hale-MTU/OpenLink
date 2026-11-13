@@ -37,9 +37,11 @@ interface OpenLinkHostCapabilities {
      * Without it the library takes the workout as stopped by the host after 30 minutes and tells
      * the owner; an end reported later still reaches the owner. One workout per device
      * (`busy`) is the host app's to check: only it knows its devices.
+     *
+     * Empty by default: a host app that offers no recorded workout has none to pause.
      */
-    fun pauseRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long)
-    fun resumeRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long)
+    fun pauseRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long) = Unit
+    fun resumeRecording(caller: OpenLinkCaller, sessionId: String, atMillis: Long) = Unit
 
     // live
     fun subscribeLive(caller: OpenLinkCaller, subscription: OpenLinkLiveSubscription)

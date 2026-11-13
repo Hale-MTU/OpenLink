@@ -473,15 +473,76 @@ class OpenLinkSessionsTest {
     @Test
     fun `an ended workout is its owner's, so another app's end under the same id does not replace it`() {
         val storage = MapStorage()
-        OpenLinkSessions(storage).apply {
+        OpenLinkSessions(storage, clock = { now }).apply {
             startRecording(workout("w"), "a")
             reported(stopped("w", at = 1))
             startRecording(workout("w"), "b")
-            reported(stopped("w", at = 2))
+            reported(stopped("w", at = 2_000))
         }
 
         val after = OpenLinkSessions(storage)
         assertThat(after.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Ended(stopped("w", at = 1)))
-        assertThat(after.startRecording(workout("w"), "b")).isEqualTo(OpenLinkStart.Ended(stopped("w", at = 2)))
+        assertThat(after.startRecording(workout("w"), "b")).isEqualTo(OpenLinkStart.Ended(stopped("w", at = 2_000)))
+    }
+
+    @Test
+    fun `a fuller end of an ended workout reaches its owner, not another app's workout under the same id`() {
+        val storage = MapStorage()
+        val sessions = OpenLinkSessions(storage, clock = { now })
+        sessions.startRecording(workout("w"), "a")
+        sessions.reported(stopped("w", at = 500))
+        now = 2_000
+        assertThat(sessions.startRecording(workout("w"), "b")).isEqualTo(OpenLinkStart.Begin)
+        sessions.reported(state("w", OpenLinkRecordingPhase.RECORDING, at = 2_100))
+
+        val fuller = stopped("w", at = 500).copy(summary = OpenLinkWorkoutSummary(heartRateRecovery2MinBpm = 40))
+        assertThat(sessions.reported(fuller)).isEqualTo("a")
+        assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "w")).isEqualTo("b")
+        // An older state is not b's either.
+        assertThat(sessions.reported(state("w", OpenLinkRecordingPhase.PAUSED, at = 600))).isNull()
+        assertThat(sessions.control("w", "b", pause = true, atMillis = 2_200)).isTrue()
+
+        // Also after a restart: b's start time is kept.
+        val after = OpenLinkSessions(storage, clock = { now })
+        assertThat(after.reported(fuller)).isEqualTo("a")
+        assertThat(after.owner(OpenLink.CAPABILITY_RECORDING, "w")).isEqualTo("b")
+        assertThat(after.reported(stopped("w", at = 2_300))).isEqualTo("b")
+        assertThat(after.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Ended(fuller))
+    }
+
+    @Test
+    fun `a recorded workout under the id of the caller's own stream session is not taken`() {
+        sessions.startRecording(stream("s"), "a")
+
+        assertThat(sessions.startRecording(workout("s"), "a")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY))
+        assertThat(sessions.control("s", "a", pause = true, atMillis = 1)).isFalse()
+        assertThat(sessions.startRecording(stream("s"), "a")).isEqualTo(OpenLinkStart.Begin)
+    }
+
+    @Test
+    fun `a stop for a session the caller does not hold gets an end`() {
+        sessions.startRecording(workout("theirs"), "b")
+        assertThat(sessions.unheldStop("theirs", "a")).isEqualTo(
+            OpenLinkRecordingState("theirs", "", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, now),
+        )
+        assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "theirs")).isEqualTo("b")
+
+        sessions.startRecording(workout("mine"), "a")
+        assertThat(sessions.unheldStop("mine", "a")).isNull()
+        sessions.reported(stopped("mine", at = 7))
+        assertThat(sessions.unheldStop("mine", "a")).isEqualTo(stopped("mine", at = 7))
+    }
+
+    @Test
+    fun `an end whose reason holds a tab survives a restart`() {
+        val storage = MapStorage()
+        val summary = OpenLinkWorkoutSummary(trimp = 12.0)
+        OpenLinkSessions(storage).apply {
+            startRecording(workout("w"), "a")
+            reported(stopped("w", at = 9).copy(reason = "odd\treason", summary = summary))
+        }
+
+        assertThat(OpenLinkSessions(storage).startRecording(workout("w"), "a"))
+            .isEqualTo(OpenLinkStart.Ended(stopped("w", at = 9).copy(reason = "odd reason", summary = summary)))
     }
 }

@@ -348,6 +348,24 @@ class OpenLinkClientCoreTest {
     }
 
     @Test
+    fun `a stop of a recorded workout no host was sent ends it here, and sends nothing`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        val host = FakeHost(pending)
+        core.onConnected(host, NoListener)
+        core.startRecording(record)
+
+        core.stopRecording("rec")
+        core.events.onStateChanged(trusted)
+
+        assertThat(seen).containsExactly(
+            OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, now),
+        )
+        assertThat(host.calls.filter { it.endsWith(":rec") }).isEmpty()
+        job.cancel()
+    }
+
+    @Test
     fun `a stop of a stream session while disconnected is not owed, the unbind ended it`() {
         core.onConnected(FakeHost(trusted), NoListener)
         core.startRecording(OpenLinkRecordingRequest("str"))

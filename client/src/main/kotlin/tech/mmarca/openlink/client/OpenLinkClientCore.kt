@@ -201,7 +201,13 @@ class OpenLinkClientCore(
     fun stopRecording(sessionId: String) {
         controls.remove(sessionId)
         val request = recordings.remove(sessionId) ?: return
-        if (request.mode == OpenLinkRecordingMode.RECORD) {
+        if (request.mode == OpenLinkRecordingMode.RECORD && sessionId !in begun) {
+            // No host has it (the capability is still pending): no workout ran, and no end would
+            // come. It ends here.
+            _recordingStates.tryEmit(
+                OpenLinkRecordingState(sessionId, request.deviceId.orEmpty(), OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, clock()),
+            )
+        } else if (request.mode == OpenLinkRecordingMode.RECORD) {
             // Its end comes after the stop, with the workout's summary.
             remember(sessionId)
             // Kept until sent: a throw (the host died) leaves it for the reconnect.
@@ -363,7 +369,7 @@ class OpenLinkClientCore(
 
         fun onRecordingStateChanged(state: OpenLinkRecordingState) {
             if (state() == null) return
-            val over = state.phase == OpenLinkRecordingPhase.STOPPED || state.phase == OpenLinkRecordingPhase.FAILED
+            val over = state.phase.isOver
             val request = recordings[state.sessionId]
             if (request == null) {
                 // The end of a workout the app stopped, or a fuller end of one that already ended
