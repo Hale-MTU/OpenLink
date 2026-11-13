@@ -27,6 +27,7 @@ import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
 
@@ -73,6 +74,7 @@ class OpenLinkClient(
     val liveBatches: SharedFlow<OpenLinkLiveBatch> = core.liveBatches
     val dataWritten: SharedFlow<OpenLinkDataWritten> = core.dataWritten
     val profileExchangedAtMillis: StateFlow<Long> = core.profileExchangedAtMillis
+    val hostSettings: StateFlow<OpenLinkSettings> = core.hostSettings
 
     private val listener = object : IOpenLinkListener.Stub() {
         override fun onStateChanged(state: OpenLinkState?) = post { core.events.onStateChanged(state ?: return@post) }
@@ -81,6 +83,7 @@ class OpenLinkClient(
         override fun onRecordingStateChanged(state: OpenLinkRecordingState?) = post { core.events.onRecordingStateChanged(state ?: return@post) }
         override fun onLiveSamples(batch: OpenLinkLiveBatch?) = post { core.events.onLiveSamples(batch ?: return@post) }
         override fun onDataWritten(written: OpenLinkDataWritten?) = post { core.events.onDataWritten(written ?: return@post) }
+        override fun onSettingsChanged(settings: OpenLinkSettings?) = post { core.events.onSettingsChanged(settings ?: return@post) }
     }
 
     /** Whether the host app is installed and exports a service this client may bind. */
@@ -170,6 +173,7 @@ class OpenLinkClient(
     }
 
     fun setProfile(profile: OpenLinkProfile) = call { core.setProfile(profile) }
+    fun setSettings(settings: OpenLinkSettings) = call { core.setSettings(settings) }
     fun requestSync(deviceId: String) = call { core.requestSync(deviceId) }
     fun startRecording(request: OpenLinkRecordingRequest) = call { core.startRecording(request) }
     fun stopRecording(sessionId: String) = call { core.stopRecording(sessionId) }

@@ -25,6 +25,9 @@ import tech.mmarca.openlink.OpenLinkRecordingState
 import tech.mmarca.openlink.OpenLinkSample
 import tech.mmarca.openlink.OpenLinkSampleType
 import tech.mmarca.openlink.OpenLinkSigners
+import tech.mmarca.openlink.OpenLinkSetting
+import tech.mmarca.openlink.OpenLinkSettingKeys
+import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkState
 import tech.mmarca.openlink.OpenLinkTrust
 
@@ -53,6 +56,9 @@ class OpenLinkClientCoreTest {
         override fun resumeRecording(sessionId: String?, atMillis: Long) { calls += "resume:$sessionId@$atMillis" }
         override fun subscribeLive(subscription: OpenLinkLiveSubscription?) { calls += "live:${subscription?.sessionId}" }
         override fun unsubscribeLive(sessionId: String?) { calls += "unlive:$sessionId" }
+        var hostSettings = OpenLinkSettings.EMPTY
+        override fun setSettings(settings: OpenLinkSettings?) { calls += "setSettings:${settings?.entries?.keys?.sorted()}" }
+        override fun getSettings(): OpenLinkSettings = hostSettings
         override fun asBinder(): IBinder? = null
     }
 
@@ -63,6 +69,7 @@ class OpenLinkClientCoreTest {
         override fun onRecordingStateChanged(state: tech.mmarca.openlink.OpenLinkRecordingState?) = Unit
         override fun onLiveSamples(batch: OpenLinkLiveBatch?) = Unit
         override fun onDataWritten(written: tech.mmarca.openlink.OpenLinkDataWritten?) = Unit
+        override fun onSettingsChanged(settings: OpenLinkSettings?) = Unit
         override fun asBinder(): IBinder? = null
     }
 
@@ -70,6 +77,62 @@ class OpenLinkClientCoreTest {
     private val pending = OpenLinkState(trust = OpenLinkTrust.PENDING)
     private var now = 100L
     private val core = OpenLinkClientCore(OpenLink.ALL_CAPABILITIES, "2.17.0", clock = { now })
+
+    @Test
+    fun `settings go to a version 3 host once, only the keys OpenLink knows`() {
+        core.onStarting()
+        core.setSettings(
+            OpenLinkSettings(
+                mapOf(
+                    OpenLinkSettingKeys.GOAL_STEPS.name to OpenLinkSetting(9_000.0, 50),
+                    "note.free_text" to OpenLinkSetting(1.0, 50),
+                ),
+            ),
+        )
+        val host = FakeHost(trusted)
+
+        core.onConnected(host, NoListener)
+        core.onDisconnected()
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+
+        assertThat(host.calls).contains("setSettings:[goal.steps]")
+        assertThat(again.calls.none { it.startsWith("setSettings") }).isTrue()
+    }
+
+    @Test
+    fun `a version 2 host is sent no settings and shows none, until it speaks version 3`() {
+        val v2 = trusted.copy(protocolVersion = 2)
+        val host = FakeHost(v2).apply { hostSettings = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50) }
+        core.onConnected(host, NoListener)
+
+        core.setSettings(OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_FLOORS, listOf(12.0), 60))
+        core.events.onSettingsChanged(host.hostSettings)
+
+        assertThat(host.calls.none { it.startsWith("setSettings") }).isTrue()
+        assertThat(core.hostSettings.value.isEmpty).isTrue()
+    }
+
+    @Test
+    fun `the host's settings come in checked, and not without the capability`() {
+        val host = FakeHost(trusted).apply {
+            hostSettings = OpenLinkSettings(
+                mapOf(
+                    OpenLinkSettingKeys.GOAL_STEPS.name to OpenLinkSetting(8_000.0, 50),
+                    // Out of range: no step goal of a million.
+                    OpenLinkSettingKeys.GOAL_FLOORS.name to OpenLinkSetting(1_000_000.0, 50),
+                ),
+            )
+        }
+        core.onConnected(host, NoListener)
+        assertThat(core.hostSettings.value.number(OpenLinkSettingKeys.GOAL_STEPS)).isEqualTo(8_000.0)
+        assertThat(core.hostSettings.value.number(OpenLinkSettingKeys.GOAL_FLOORS)).isNull()
+
+        core.events.onStateChanged(trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_SETTINGS))
+        core.events.onSettingsChanged(host.hostSettings)
+
+        assertThat(core.hostSettings.value.isEmpty).isTrue()
+    }
 
     @Test
     fun `a trusted connection catches up on devices and the host's profile`() {
