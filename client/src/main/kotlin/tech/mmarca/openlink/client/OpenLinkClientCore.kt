@@ -20,6 +20,7 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
 
@@ -84,6 +85,14 @@ class OpenLinkClientCore(
     private val _hostProfile = MutableStateFlow<OpenLinkProfile?>(null)
     val hostProfile: StateFlow<OpenLinkProfile?> = _hostProfile.asStateFlow()
 
+    private val _hostSettings = MutableStateFlow(OpenLinkSettings.EMPTY)
+
+    /**
+     * The host's settings (version 3, capability settings), checked: only keys OpenLink knows,
+     * with values that fit them. Empty without the capability or on an older host.
+     */
+    val hostSettings: StateFlow<OpenLinkSettings> = _hostSettings.asStateFlow()
+
     private val _recordingStates = MutableSharedFlow<OpenLinkRecordingState>(extraBufferCapacity = 16, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     /**
      * The states of the app's recording sessions, as the host reports them, and the failures the
@@ -107,6 +116,9 @@ class OpenLinkClientCore(
 
     private var host: IOpenLinkHost? = null
     private var pendingProfile: OpenLinkProfile? = null
+
+    /** Settings the app changed that the host has not taken yet; the newer per key wins. */
+    private var pendingSettings = OpenLinkSettings.EMPTY
     private val recordings = linkedMapOf<String, OpenLinkRecordingRequest>()
 
     /**
@@ -156,6 +168,7 @@ class OpenLinkClientCore(
         _status.value = OpenLinkStatus.HostUntrusted(signerSha256)
         _devices.value = emptyList()
         _hostProfile.value = null
+        _hostSettings.value = OpenLinkSettings.EMPTY
     }
 
     fun onStopped() {
@@ -186,6 +199,16 @@ class OpenLinkClientCore(
     fun setProfile(profile: OpenLinkProfile) {
         pendingProfile = profile
         flushProfile()
+    }
+
+    /**
+     * Sends the settings the app changed now if allowed, else when the host next allows it
+     * (version 3, capability settings). Send only what changed, each with the time the user
+     * changed it; keys OpenLink does not know and values that do not fit are dropped here.
+     */
+    fun setSettings(settings: OpenLinkSettings) {
+        pendingSettings = pendingSettings.merge(settings.valid(clock()))
+        flushSettings()
     }
 
     fun requestSync(deviceId: String) {
@@ -255,6 +278,9 @@ class OpenLinkClientCore(
 
     private fun granted(capability: String): Boolean = state()?.has(capability) == true
 
+    private fun settingsAllowed(state: OpenLinkState? = state()): Boolean =
+        state != null && state.protocolVersion >= OpenLink.SETTINGS_VERSION && state.has(OpenLink.CAPABILITY_SETTINGS)
+
     private fun applyState(state: OpenLinkState) {
         val before = state()
         // The host repeats the state when the listener registers; nothing to catch up on then.
@@ -268,6 +294,12 @@ class OpenLinkClientCore(
             flushProfile()
         } else {
             _hostProfile.value = null
+        }
+        if (settingsAllowed(state)) {
+            _hostSettings.value = host.settings?.valid(clock()) ?: OpenLinkSettings.EMPTY
+            flushSettings()
+        } else {
+            _hostSettings.value = OpenLinkSettings.EMPTY
         }
         // Replay what the app holds whenever the capability is newly there: after a reconnect
         // (before is null) or a grant. The host ignores a session it already has.
@@ -349,6 +381,12 @@ class OpenLinkClientCore(
         _profileExchangedAtMillis.value = clock()
     }
 
+    private fun flushSettings() {
+        if (pendingSettings.isEmpty || !settingsAllowed()) return
+        host?.setSettings(pendingSettings) ?: return
+        pendingSettings = OpenLinkSettings.EMPTY
+    }
+
     private fun List<OpenLinkDevice>.real(): List<OpenLinkDevice> = filter { it.id.isNotEmpty() }
 
     /** The listener's callbacks, forwarded by the binder side's stub. */
@@ -361,6 +399,10 @@ class OpenLinkClientCore(
             if (!granted(OpenLink.CAPABILITY_PROFILE)) return
             _hostProfile.value = profile.takeUnless { it.isEmpty }
             if (!profile.isEmpty) _profileExchangedAtMillis.value = clock()
+        }
+
+        fun onSettingsChanged(settings: OpenLinkSettings) {
+            if (settingsAllowed()) _hostSettings.value = settings.valid(clock())
         }
 
         fun onDevicesChanged(devices: List<OpenLinkDevice>) {

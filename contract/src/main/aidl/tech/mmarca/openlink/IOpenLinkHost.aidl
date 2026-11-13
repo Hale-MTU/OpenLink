@@ -7,6 +7,7 @@ import tech.mmarca.openlink.OpenLinkProfile;
 import tech.mmarca.openlink.OpenLinkDevice;
 import tech.mmarca.openlink.OpenLinkRecordingRequest;
 import tech.mmarca.openlink.OpenLinkLiveSubscription;
+import tech.mmarca.openlink.OpenLinkSettings;
 
 /**
  * The host's side of the channel. The caller's identity comes from the binder, never from
@@ -40,4 +41,9 @@ interface IOpenLinkHost {
     /** Pauses the session's workout; [atMillis] is the client's clock. A repeat changes nothing. */
     oneway void pauseRecording(String sessionId, long atMillis);
     oneway void resumeRecording(String sessionId, long atMillis);
+
+    // settings, version 3. Appended last so the transaction codes of versions 1 and 2 stay.
+    /** The settings the caller changed, each with its time; the host keeps the newer per key. */
+    oneway void setSettings(in OpenLinkSettings settings);
+    OpenLinkSettings getSettings();
 }

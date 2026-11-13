@@ -6,6 +6,7 @@ import tech.mmarca.openlink.OpenLinkDevice;
 import tech.mmarca.openlink.OpenLinkRecordingState;
 import tech.mmarca.openlink.OpenLinkLiveBatch;
 import tech.mmarca.openlink.OpenLinkDataWritten;
+import tech.mmarca.openlink.OpenLinkSettings;
 
 /**
  * What a host tells a bound client. Every method is oneway: the host never waits on a
@@ -27,4 +28,8 @@ oneway interface IOpenLinkListener {
     // only to a client that negotiated version 2.
     /** The host wrote new data to Health Connect; no values (capability devices). */
     void onDataWritten(in OpenLinkDataWritten written);
+
+    // version 3. Appended last; the host sends it only to a client that negotiated version 3.
+    /** The host's settings changed: all of them, each with its time (capability settings). */
+    void onSettingsChanged(in OpenLinkSettings settings);
 }

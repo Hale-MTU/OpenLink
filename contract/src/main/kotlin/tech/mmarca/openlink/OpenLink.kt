@@ -3,7 +3,7 @@ package tech.mmarca.openlink
 /** The constants both sides of the channel agree on. See docs/spec.md. */
 object OpenLink {
     /** The protocol this library speaks. Both sides send theirs in hello and use the lower. */
-    const val PROTOCOL_VERSION: Int = 2
+    const val PROTOCOL_VERSION: Int = 3
 
     /** The intent action a host's service answers to; the client also names the host's package. */
     const val ACTION_HOST: String = "tech.mmarca.openlink.action.HOST"
@@ -17,8 +17,14 @@ object OpenLink {
     const val CAPABILITY_RECORDING: String = "recording"
     const val CAPABILITY_LIVE: String = "live"
 
+    /** Version 3: the user's goals and limits ([OpenLinkSettings]), both ways. */
+    const val CAPABILITY_SETTINGS: String = "settings"
+
+    /** The first protocol version that carries [CAPABILITY_SETTINGS]. */
+    const val SETTINGS_VERSION: Int = 3
+
     val ALL_CAPABILITIES: Set<String> =
-        setOf(CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE)
+        setOf(CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE, CAPABILITY_SETTINGS)
 
     fun permissionFor(hostPackage: String): String = hostPackage + PERMISSION_SUFFIX
 }

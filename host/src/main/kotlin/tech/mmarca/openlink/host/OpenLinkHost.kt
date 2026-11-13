@@ -24,6 +24,7 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkState
 import tech.mmarca.openlink.OpenLinkTrust
 
@@ -193,12 +194,43 @@ class OpenLinkHost(
                 capabilities.unsubscribeLive(caller, sessionId)
             }
         }
+
+        override fun setSettings(settings: OpenLinkSettings?) = gated(OpenLink.CAPABILITY_SETTINGS) { caller ->
+            if (core.versionOf(caller.packageName) < OpenLink.SETTINGS_VERSION) return@gated
+            val received = settings ?: return@gated
+            val valid = received.valid(System.currentTimeMillis())
+            // A count, never a key or a value.
+            if (valid.entries.size < received.entries.size) Log.i(TAG, "dropped ${received.entries.size - valid.entries.size} settings")
+            if (!valid.isEmpty) capabilities.setSettings(caller, valid)
+        }
+
+        override fun getSettings(): OpenLinkSettings =
+            gatedValue(OpenLink.CAPABILITY_SETTINGS, OpenLinkSettings.EMPTY) { caller ->
+                if (core.versionOf(caller.packageName) < OpenLink.SETTINGS_VERSION) {
+                    OpenLinkSettings.EMPTY
+                } else {
+                    capabilities.settings().valid(System.currentTimeMillis())
+                }
+            }
     }
 
     // --- events the host app publishes
 
     fun publishProfile(profile: OpenLinkProfile) =
         broadcast(OpenLink.CAPABILITY_PROFILE) { it.onProfileChanged(profile) }
+
+    /**
+     * The host's settings changed (version 3): all of them, to every client trusted with
+     * settings that speaks version 3. Only valid ones leave the host.
+     */
+    fun publishSettings(settings: OpenLinkSettings) {
+        val valid = settings.valid(System.currentTimeMillis())
+        forEachListener { listener, caller ->
+            if (core.versionOf(caller.packageName) >= OpenLink.SETTINGS_VERSION && core.allows(caller, OpenLink.CAPABILITY_SETTINGS)) {
+                listener.onSettingsChanged(valid)
+            }
+        }
+    }
 
     fun publishDevices(devices: List<OpenLinkDevice>) =
         broadcast(OpenLink.CAPABILITY_DEVICES) { it.onDevicesChanged(devices) }

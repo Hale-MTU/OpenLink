@@ -4,6 +4,7 @@ import tech.mmarca.openlink.OpenLinkDevice
 import tech.mmarca.openlink.OpenLinkLiveSubscription
 import tech.mmarca.openlink.OpenLinkProfile
 import tech.mmarca.openlink.OpenLinkRecordingRequest
+import tech.mmarca.openlink.OpenLinkSettings
 
 /**
  * What the host app implements. Every method is called on a binder thread, only for a
@@ -46,4 +47,15 @@ interface OpenLinkHostCapabilities {
     // live
     fun subscribeLive(caller: OpenLinkCaller, subscription: OpenLinkLiveSubscription)
     fun unsubscribeLive(caller: OpenLinkCaller, sessionId: String)
+
+    // settings, version 3. A host that keeps none leaves both as they are.
+    /** The host's settings, each with its time. The library sends only valid ones. */
+    fun settings(): OpenLinkSettings = OpenLinkSettings.EMPTY
+
+    /**
+     * Settings the caller changed, already checked ([OpenLinkSettings.valid]) and never empty.
+     * The host app keeps the newer per key ([OpenLinkSettings.merge]) and publishes the result
+     * if anything changed, so its other clients hear of it.
+     */
+    fun setSettings(caller: OpenLinkCaller, settings: OpenLinkSettings) = Unit
 }
