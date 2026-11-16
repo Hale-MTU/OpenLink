@@ -31,11 +31,13 @@ interface OpenLinkHostCapabilities {
      * pause or resume it hands on as done: the host app reports the state the workout is in
      * after each (`PAUSED` or `RECORDING`, at the time it learns it), also when the device did not
      * take it, so a request that failed can be made again. A start for a
-     * recorded workout comes once, with a device id; a stop comes once, and the session stays
+     * recorded workout comes with a device id, once, unless the host app has reported nothing of
+     * it when the client replays it (then it comes again); a stop comes once, and the session stays
      * the owner's until the host app reports `STOPPED` or `FAILED`: the host app must report one
      * for every stop it is handed, also when the device is gone (`FAILED`, `not_connected`).
      * Without it the library takes the workout as stopped by the host after 30 minutes and tells
-     * the owner; an end reported later still reaches the owner. One workout per device
+     * the owner; an end reported later still reaches the owner. Every report names the owner
+     * (`OpenLinkHost.publishRecordingState(state, caller.packageName)`). One workout per device
      * (`busy`) is the host app's to check: only it knows its devices.
      *
      * Empty by default: a host app that offers no recorded workout has none to pause.

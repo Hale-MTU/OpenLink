@@ -340,11 +340,55 @@ class OpenLinkClientCoreTest {
         core.onConnected(again, NoListener)
         assertThat(again.calls).contains("stop:rec")
         assertThat(again.calls).doesNotContain("start:rec")
-        // Sent once.
+        // Sent again on each connection until the end comes.
         core.onDisconnected()
         val third = FakeHost(trusted)
         core.onConnected(third, NoListener)
-        assertThat(third.calls).doesNotContain("stop:rec")
+        assertThat(third.calls).contains("stop:rec")
+        core.events.onRecordingStateChanged(OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, now))
+        core.onDisconnected()
+        val fourth = FakeHost(trusted)
+        core.onConnected(fourth, NoListener)
+        assertThat(fourth.calls).doesNotContain("stop:rec")
+    }
+
+    @Test
+    fun `the end of a stopped workout reported while unbound is asked for again on the reconnect`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        core.onConnected(FakeHost(trusted), NoListener)
+        core.startRecording(record)
+        // The stop is delivered; the end comes while the client is away.
+        core.stopRecording("rec")
+        core.onDisconnected()
+
+        val again = FakeHost(trusted)
+        core.onConnected(again, NoListener)
+        assertThat(again.calls).contains("stop:rec")
+        assertThat(core.activeRecordings()).doesNotContain("rec")
+        // The host answers the repeated stop with the remembered end.
+        val end = OpenLinkRecordingState("rec", "w1", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_ON_DEVICE, now)
+        core.events.onRecordingStateChanged(end)
+        assertThat(seen).containsExactly(end)
+        job.cancel()
+    }
+
+    @Test
+    fun `a recorded workout under the id of the app's stream session fails and keeps the stream session`() = runTest(UnconfinedTestDispatcher()) {
+        val seen = mutableListOf<OpenLinkRecordingState>()
+        val job = launch { core.recordingStates.collect { seen += it } }
+        val host = FakeHost(trusted)
+        core.onConnected(host, NoListener)
+        core.startRecording(OpenLinkRecordingRequest("rec"))
+
+        core.startRecording(record)
+        assertThat(seen.single().phase).isEqualTo(OpenLinkRecordingPhase.FAILED)
+        assertThat(seen.single().reason).isEqualTo(OpenLinkRecordingState.REASON_BUSY)
+        assertThat(host.calls.count { it == "start:rec" }).isEqualTo(1)
+
+        core.stopRecording("rec")
+        assertThat(host.calls).contains("stop:rec")
+        job.cancel()
     }
 
     @Test

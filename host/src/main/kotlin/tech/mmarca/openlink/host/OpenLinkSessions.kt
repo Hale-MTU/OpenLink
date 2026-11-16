@@ -26,7 +26,7 @@ sealed interface OpenLinkStart {
     /** The caller holds it already: nothing to hand on; tell the caller [last] if it is known. */
     data class Already(val last: OpenLinkRecordingState?) : OpenLinkStart
 
-    /** Another client owns the session id, or the id is not one the host takes: nothing happens. */
+    /** Another client owns the stream session id, or the id is blank: nothing happens (version 1). */
     data object Refused : OpenLinkStart
 
     /** The caller's recording ended while it was away: tell it [last], start nothing. */
@@ -122,19 +122,27 @@ class OpenLinkSessions(
     @Synchronized
     fun startRecording(request: OpenLinkRecordingRequest, packageName: String): OpenLinkStart {
         val sessionId = request.sessionId
-        if (sessionId.isBlank() || sessionId.length > MAX_SESSION_ID_LENGTH) return OpenLinkStart.Refused
+        val record = request.mode == OpenLinkRecordingMode.RECORD
+        if (sessionId.isBlank()) return if (record) OpenLinkStart.Failed(OpenLinkRecordingState.REASON_UNSUPPORTED) else OpenLinkStart.Refused
+        // The limit is version 2's: a stream session keeps version 1's ids.
+        if (record && sessionId.length > MAX_SESSION_ID_LENGTH) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_UNSUPPORTED)
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
         when (owners[key]) {
             // A stream session's repeat goes to the host app again: one that failed (its device
             // gone) is retried, as in version 1.
-            packageName -> return workouts[sessionId]?.let { OpenLinkStart.Already(it.last) }
+            packageName -> return workouts[sessionId]?.let { workout ->
+                // A workout the host app has said nothing of since it was handed the start (it
+                // dropped the start, or the host restarted before it reported) is handed on again.
+                if (!workout.ran && workout.last == null && !workout.stopping) OpenLinkStart.Begin else OpenLinkStart.Already(workout.last)
+            }
                 // A recorded workout under the id of the caller's own stream session: not taken.
-                ?: if (request.mode == OpenLinkRecordingMode.RECORD) OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY) else OpenLinkStart.Begin
+                ?: if (record) OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY) else OpenLinkStart.Begin
             null -> Unit
-            else -> return OpenLinkStart.Refused
+            // Another app's: a stream start is dropped as in version 1, a recorded one is answered.
+            else -> return if (record) OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY) else OpenLinkStart.Refused
         }
-        finished[Done(packageName, sessionId)]?.let { return OpenLinkStart.Ended(it) }
-        if (request.mode == OpenLinkRecordingMode.RECORD) {
+        if (record) {
+            finished[Done(packageName, sessionId)]?.let { return OpenLinkStart.Ended(it) }
             if (request.deviceId.isNullOrBlank()) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_NO_DEVICE)
             val held = workouts.keys.count { owners[Key(OpenLink.CAPABILITY_RECORDING, it)] == packageName }
             if (held >= MAX_WORKOUTS_PER_APP) return OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY)
@@ -148,14 +156,30 @@ class OpenLinkSessions(
     }
 
     /**
+     * The host app could not take the start it was handed for [packageName]'s [sessionId] (it
+     * threw): the session is free again, as after a start the host app reported `FAILED`.
+     */
+    @Synchronized
+    fun abandon(sessionId: String, packageName: String) {
+        val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
+        if (owners[key] != packageName) return
+        drop(key)
+        publish()
+    }
+
+    /**
      * The owner asks to pause ([pause]) or resume its recorded workout at [atMillis]. True if it
      * changes the workout: the host app is to act on it. A stream session has no pause.
+     *
+     * A request older than the last change is dropped; a last change stamped later than now (a
+     * watch's clock ahead, the phone's clock set back) counts as now, so it does not hold off
+     * every request until the clock catches up.
      */
     @Synchronized
     fun control(sessionId: String, packageName: String, pause: Boolean, atMillis: Long): Boolean {
         if (owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] != packageName) return false
         val workout = workouts[sessionId] ?: return false
-        if (workout.stopping || workout.paused == pause || atMillis < workout.changedAtMillis) return false
+        if (workout.stopping || workout.paused == pause || atMillis < minOf(workout.changedAtMillis, clock())) return false
         workouts[sessionId] = workout.copy(paused = pause, changedAtMillis = atMillis)
         save(sessionId)
         return true
@@ -194,6 +218,11 @@ class OpenLinkSessions(
             ?: OpenLinkRecordingState(sessionId, "", OpenLinkRecordingPhase.STOPPED, OpenLinkRecordingState.REASON_STOPPED_BY_CLIENT, clock())
     }
 
+    /** The last state the host app reported for [packageName]'s recorded workout, if known. */
+    @Synchronized
+    fun last(sessionId: String, packageName: String): OpenLinkRecordingState? =
+        if (owners[Key(OpenLink.CAPABILITY_RECORDING, sessionId)] == packageName) workouts[sessionId]?.last else null
+
     @Synchronized
     fun release(capability: String, sessionId: String, packageName: String): Boolean {
         val key = Key(capability, sessionId)
@@ -204,24 +233,31 @@ class OpenLinkSessions(
     }
 
     /**
-     * The host app reported [state]: returns the owner to tell, or null if no one holds the
-     * session. A pause or resume on the watch changes the workout as one from the owner would;
-     * an end makes it over for good, remembered as ended. A later end for an ended one (a fuller
-     * summary) replaces what is remembered and reaches its owner too, also once another app
-     * took the same session id: a report older than that app's start is not about its session.
+     * The host app reported [state] for [packageName]'s session: returns the owner to tell, or
+     * null if no one holds the session. A pause or resume on the watch changes the workout as one
+     * from the owner would; an end makes it over for good, remembered as ended. A later end for an
+     * ended one (a fuller summary) replaces what is remembered and reaches its owner too, also once
+     * another app took the same session id.
+     *
+     * Without [packageName] (a version 1 host app, which names a session by its id only) a report
+     * older than the current owner's start, under an id that ended before, is taken as about the
+     * ended workout.
      */
     @Synchronized
-    fun reported(state: OpenLinkRecordingState): String? {
+    fun reported(state: OpenLinkRecordingState, packageName: String? = null): String? {
         val sessionId = state.sessionId
         val key = Key(OpenLink.CAPABILITY_RECORDING, sessionId)
         val over = state.phase.isOver
-        val current = owners[key]?.takeUnless {
-            state.atMillis < (begunAt[sessionId] ?: Long.MIN_VALUE) && finished.keys.any { it.sessionId == sessionId }
+        val current = owners[key]?.takeIf { owner ->
+            if (packageName != null) owner == packageName
+            else state.atMillis >= (begunAt[sessionId] ?: Long.MIN_VALUE) || finished.keys.none { it.sessionId == sessionId }
         }
         val owner = current ?: run {
             if (!over) return null
-            // The host app names the session only: the latest that ended under this id.
-            val ended = finished.keys.lastOrNull { it.sessionId == sessionId }?.owner ?: return null
+            val ended = packageName?.takeIf { Done(it, sessionId) in finished }
+                // Named by its id only: the latest that ended under this id.
+                ?: finished.keys.lastOrNull { it.sessionId == sessionId }?.owner?.takeIf { packageName == null }
+                ?: return null
             remember(sessionId, ended, state)
             return ended
         }
@@ -242,7 +278,8 @@ class OpenLinkSessions(
                 val changed = paused != workout.paused && state.atMillis >= workout.changedAtMillis
                 workout.copy(
                     paused = if (changed) paused else workout.paused,
-                    changedAtMillis = if (changed) state.atMillis else workout.changedAtMillis,
+                    // A report stamped by a clock ahead of the phone's counts as now.
+                    changedAtMillis = if (changed) minOf(state.atMillis, clock()) else workout.changedAtMillis,
                     ran = true,
                     last = state,
                 )
@@ -258,8 +295,11 @@ class OpenLinkSessions(
     @Synchronized
     fun owner(capability: String, sessionId: String): String? = owners[Key(capability, sessionId)]
 
-    /** A session [releaseAll] ended; [stopOwed] if the host app has not been handed its stop yet. */
-    data class Released(val sessionId: String, val stopOwed: Boolean)
+    /**
+     * A session [releaseAll] ended; [stopOwed] if the host app has not been handed its stop yet.
+     * [end] is what its owner is told of a recording session (remembered, for a recorded workout).
+     */
+    data class Released(val sessionId: String, val stopOwed: Boolean, val end: OpenLinkRecordingState?)
 
     /**
      * Removes and returns the sessions [packageName] owns under [capability]; with
@@ -275,10 +315,12 @@ class OpenLinkSessions(
                 !(keepDetached && key.capability == OpenLink.CAPABILITY_RECORDING && key.sessionId in workouts)
         }.keys.toList()
         val released = keys.map { key ->
-            val workout = if (key.capability == OpenLink.CAPABILITY_RECORDING) workouts[key.sessionId] else null
+            val recording = key.capability == OpenLink.CAPABILITY_RECORDING
+            val workout = if (recording) workouts[key.sessionId] else null
             drop(key)
-            if (workout != null) remember(key.sessionId, packageName, hostStopped(key.sessionId))
-            Released(key.sessionId, stopOwed = workout?.stopping != true)
+            val end = if (recording) hostStopped(key.sessionId) else null
+            if (workout != null && end != null) remember(key.sessionId, packageName, end)
+            Released(key.sessionId, stopOwed = workout?.stopping != true, end = end)
         }
         if (keys.isNotEmpty()) publish()
         return released

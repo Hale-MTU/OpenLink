@@ -271,18 +271,22 @@ The host library (`OpenLinkSessions`) enforces every rule that needs no device, 
 does not build them again, and hands the host app only what changes a workout:
 
 - A request in `RECORD` mode needs a `deviceId`; without one it gets `FAILED`, reason
-  `no_device`. A session id is at most 128 characters, and one app holds at most 4 recorded
+  `no_device`. Its session id is at most 128 characters and not blank (else `FAILED`, reason
+  `unsupported`; a stream session keeps version 1's ids), and one app holds at most 4 recorded
   workouts at once (more get `FAILED`, reason `busy`, as does a `RECORD` start under the id of
-  the app's own stream session).
+  the app's own stream session or of another app's session).
 - A repeated start, pause, resume or stop changes nothing and is not handed on. A repeated start
   is answered with the workout's last reported state, so a client that reconnects learns where
-  the workout stands (after a restart of the host that state is unknown until the host app
-  reports again). A start that got `FAILED` before the workout ran, from the library or from the
+  the workout stands; a repeated pause or resume, too. A repeated start of a workout the host
+  app has reported nothing of since it was handed the start (it dropped it, or the host
+  restarted) is handed on again. A start the host app throws on gets `FAILED`, reason
+  `not_connected`. A start that got `FAILED` before the workout ran, from the library or from the
   host app (`busy`, `not_connected`), uses up nothing: it may be tried again with the same
   session id. A workout ran once the host app reported it `RECORDING` or `PAUSED`; its end, a
   failure included, is remembered like any other.
 - The host holds the state (recording or paused) with the time of its last change, and drops a
-  request older than that. Every time is the phone's clock. A pause or resume the host app
+  request older than that. Every time is the phone's clock; a last change stamped later than
+  now (a watch's clock ahead, the phone's clock set back) counts as now. A pause or resume the host app
   reports from the wearable counts as a change, so a client's older wish that it replays after a
   reconnect does not undo a press on the watch. A report older than the last change, or one that
   repeats the state, is no change.
@@ -302,9 +306,11 @@ does not build them again, and hands the host app only what changes a workout:
   not begin a new workout. The client library, too, drops a recorded workout a host had once it
   hears the capability is gone, and reports it `STOPPED`, `host_stopped`; so too one it stopped
   whose end it has not heard.
-- An ended workout is remembered for its owner: another app may use the same session id. A
-  report older than that app's start is about the ended workout, so its fuller end still reaches
-  its owner and does not end the other app's.
+- An ended workout is remembered for its owner: another app may use the same session id. A host
+  app that offers recorded workouts names the owner of each report
+  (`publishRecordingState(state, packageName)`), so a fuller end reaches its owner and does not
+  end the other app's. A report without one (a version 1 host app) that is older than the other
+  app's start is taken as about the ended workout.
 - A stop for a session the caller does not hold is answered with its end: the remembered one if
   the workout ended, else `STOPPED`, `stopped_by_client` (the host never began it).
 - Only the owner may pause, resume or stop it, and it outlives its owner's binding (above).
@@ -316,8 +322,10 @@ stop with the reason `stopped_on_device`), so the owner holds no state of its ow
 disagree with the host's.
 
 The client library delivers what it was asked while it was not connected, since such a session
-outlives the binding: a stop of a `RECORD` session is kept until the host has it (one no host
-was sent yet ends at once, `STOPPED`, `stopped_by_client`), and the last
+outlives the binding: a stop of a `RECORD` session is sent on every connection until its end
+comes, so an end reported while the client was away is asked for again (one no host was sent
+yet ends at once, `STOPPED`, `stopped_by_client`). A start under the id of another of the app's
+sessions gets `FAILED`, reason `busy`, and leaves that session as it was. The last
 pause or resume is sent again, with the time it was asked, after the start it replays, unless the
 host has since reported a newer state. It takes in the end of a workout it stopped, and a fuller
 end of one that ended, for the last 16 such workouts; in memory only, so a later summary for a

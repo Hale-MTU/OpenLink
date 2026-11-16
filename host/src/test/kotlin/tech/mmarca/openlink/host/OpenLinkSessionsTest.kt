@@ -85,8 +85,11 @@ class OpenLinkSessionsTest {
     @Test
     fun `a repeated start is not handed on again, and tells where the workout stands`() {
         assertThat(sessions.startRecording(workout("watch"), "a")).isEqualTo(OpenLinkStart.Begin)
-        assertThat(sessions.startRecording(workout("watch"), "a")).isEqualTo(OpenLinkStart.Already(null))
-        assertThat(sessions.startRecording(workout("watch"), "b")).isEqualTo(OpenLinkStart.Refused)
+        val starting = state("watch", OpenLinkRecordingPhase.STARTING, at = 2)
+        sessions.reported(starting, "a")
+        assertThat(sessions.startRecording(workout("watch"), "a")).isEqualTo(OpenLinkStart.Already(starting))
+        assertThat(sessions.startRecording(workout("watch"), "b")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY))
+        assertThat(sessions.startRecording(stream("watch"), "b")).isEqualTo(OpenLinkStart.Refused)
 
         val paused = state("watch", OpenLinkRecordingPhase.PAUSED, at = 5)
         sessions.reported(paused)
@@ -103,8 +106,9 @@ class OpenLinkSessionsTest {
         assertThat(sessions.startRecording(workout("x", device = " "), "a"))
             .isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_NO_DEVICE))
         assertThat(sessions.startRecording(workout("x".repeat(OpenLinkSessions.MAX_SESSION_ID_LENGTH + 1)), "a"))
-            .isEqualTo(OpenLinkStart.Refused)
-        assertThat(sessions.startRecording(workout(" "), "a")).isEqualTo(OpenLinkStart.Refused)
+            .isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_UNSUPPORTED))
+        assertThat(sessions.startRecording(workout(" "), "a")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_UNSUPPORTED))
+        assertThat(sessions.startRecording(stream(" "), "a")).isEqualTo(OpenLinkStart.Refused)
 
         repeat(OpenLinkSessions.MAX_WORKOUTS_PER_APP) { assertThat(sessions.startRecording(workout("w$it"), "a")).isEqualTo(OpenLinkStart.Begin) }
         assertThat(sessions.startRecording(workout("more"), "a")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY))
@@ -418,10 +422,10 @@ class OpenLinkSessionsTest {
         sessions.startRecording(workout("running"), "a")
         sessions.startRecording(stream("plain"), "a")
 
-        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING)).containsExactly(
-            OpenLinkSessions.Released("stopping", stopOwed = false),
-            OpenLinkSessions.Released("running", stopOwed = true),
-            OpenLinkSessions.Released("plain", stopOwed = true),
+        assertThat(sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING).map { it.sessionId to it.stopOwed }).containsExactly(
+            "stopping" to false,
+            "running" to true,
+            "plain" to true,
         )
     }
 
@@ -467,7 +471,7 @@ class OpenLinkSessionsTest {
 
         val after = OpenLinkSessions(storage, clock = { now })
         assertThat(after.owner(OpenLink.CAPABILITY_RECORDING, "w")).isEqualTo("b")
-        assertThat(after.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Refused)
+        assertThat(after.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY))
     }
 
     @Test
@@ -544,5 +548,69 @@ class OpenLinkSessionsTest {
 
         assertThat(OpenLinkSessions(storage).startRecording(workout("w"), "a"))
             .isEqualTo(OpenLinkStart.Ended(stopped("w", at = 9).copy(reason = "odd reason", summary = summary)))
+    }
+
+    // --- review fixes
+
+    @Test
+    fun `a start the host app said nothing of is handed on again, and one it could not take frees its place`() {
+        assertThat(sessions.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Begin)
+        // The host app dropped it: the replay goes to it again.
+        assertThat(sessions.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Begin)
+
+        repeat(OpenLinkSessions.MAX_WORKOUTS_PER_APP - 1) { sessions.startRecording(workout("x$it"), "a") }
+        assertThat(sessions.startRecording(workout("more"), "a")).isEqualTo(OpenLinkStart.Failed(OpenLinkRecordingState.REASON_BUSY))
+        sessions.abandon("w", "a")
+        assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "w")).isNull()
+        assertThat(sessions.startRecording(workout("more"), "a")).isEqualTo(OpenLinkStart.Begin)
+    }
+
+    @Test
+    fun `a report that names its owner reaches that owner, whatever its time`() {
+        sessions.startRecording(workout("w"), "a")
+        sessions.reported(state("w", OpenLinkRecordingPhase.RECORDING, at = 5), "a")
+        sessions.reported(stopped("w", at = 6), "a")
+        now = 2_000L
+        sessions.startRecording(workout("w"), "b")
+
+        // a's fuller end, stamped after b's start, is a's and leaves b's workout running.
+        assertThat(sessions.reported(stopped("w", at = 3_000L), "a")).isEqualTo("a")
+        assertThat(sessions.owner(OpenLink.CAPABILITY_RECORDING, "w")).isEqualTo("b")
+        // b's start confirmation, stamped before b's start, is b's.
+        val starting = state("w", OpenLinkRecordingPhase.STARTING, at = 1_500L)
+        assertThat(sessions.reported(starting, "b")).isEqualTo("b")
+        assertThat(sessions.last("w", "b")).isEqualTo(starting)
+        // A report for an owner that holds nothing under the id reaches no one.
+        assertThat(sessions.reported(state("w", OpenLinkRecordingPhase.RECORDING, at = 3_000L), "c")).isNull()
+    }
+
+    @Test
+    fun `a last change stamped ahead of the phone's clock does not hold off a pause`() {
+        sessions.startRecording(workout("w", at = 10), "a")
+        // The watch's clock runs 20 seconds ahead.
+        sessions.reported(state("w", OpenLinkRecordingPhase.RECORDING, at = now + 20_000L), "a")
+        sessions.reported(state("w", OpenLinkRecordingPhase.PAUSED, at = now + 21_000L), "a")
+
+        assertThat(sessions.control("w", "a", pause = false, atMillis = now + 1)).isTrue()
+        // An older wish, replayed, is still dropped.
+        assertThat(sessions.control("w", "a", pause = true, atMillis = 5)).isFalse()
+    }
+
+    @Test
+    fun `a stream start keeps version 1's ids`() {
+        val long = "s".repeat(OpenLinkSessions.MAX_SESSION_ID_LENGTH + 1)
+        assertThat(sessions.startRecording(stream(long), "a")).isEqualTo(OpenLinkStart.Begin)
+
+        sessions.startRecording(workout("w"), "a")
+        sessions.reported(stopped("w", at = 1), "a")
+        assertThat(sessions.startRecording(stream("w"), "a")).isEqualTo(OpenLinkStart.Begin)
+    }
+
+    @Test
+    fun `a session released with its capability carries the end it is remembered with`() {
+        sessions.startRecording(workout("w"), "a")
+        val released = sessions.releaseAll("a", OpenLink.CAPABILITY_RECORDING).single()
+        assertThat(released.end?.reason).isEqualTo(OpenLinkRecordingState.REASON_HOST_STOPPED)
+        assertThat(sessions.startRecording(workout("w"), "a")).isEqualTo(OpenLinkStart.Ended(released.end!!))
     }
 }
