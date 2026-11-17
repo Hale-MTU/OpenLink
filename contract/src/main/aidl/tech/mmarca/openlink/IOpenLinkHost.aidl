@@ -35,4 +35,9 @@ interface IOpenLinkHost {
     // live
     oneway void subscribeLive(in OpenLinkLiveSubscription subscription);
     oneway void unsubscribeLive(String sessionId);
+
+    // recording, version 2. Appended last so the transaction codes of version 1 stay.
+    /** Pauses the session's workout; [atMillis] is the client's clock. A repeat changes nothing. */
+    oneway void pauseRecording(String sessionId, long atMillis);
+    oneway void resumeRecording(String sessionId, long atMillis);
 }

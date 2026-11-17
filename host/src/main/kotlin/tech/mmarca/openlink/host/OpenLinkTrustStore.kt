@@ -41,7 +41,8 @@ class OpenLinkTrustStore(private val storage: OpenLinkTrustStorage) {
 
     /**
      * The records, read once: every gated call and every listener of every broadcast asks
-     * for one, and the storage is only ever written through this store.
+     * for one, and the storage's "client." keys are only ever written through this store
+     * (OpenLinkSessions may share the storage, under its own prefix).
      */
     private val records: MutableMap<String, OpenLinkClientRecord> = storage.read()
         .mapNotNull { (key, value) -> if (key.startsWith(KEY_PREFIX)) decode(key.removePrefix(KEY_PREFIX), value) else null }

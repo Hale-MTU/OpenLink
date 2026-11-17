@@ -94,9 +94,16 @@ class OpenLinkHostCore(
         return result
     }
 
+    /** The version each client negotiated in its last hello, for this run of the host. */
+    private val versions = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** What [packageName] and the host speak: the lower of their versions; 1 until it says hello. */
+    fun versionOf(packageName: String): Int = versions[packageName] ?: 1
+
     fun hello(caller: OpenLinkCaller, hello: OpenLinkHello): OpenLinkDecision = changing {
         val requested = hello.requestedCapabilities intersect OpenLink.ALL_CAPABILITIES
         val version = minOf(hello.protocolVersion.coerceAtLeast(1), OpenLink.PROTOCOL_VERSION)
+        versions[caller.packageName] = version
         val appVersion = hello.appVersion.take(MAX_APP_VERSION_LENGTH)
         val signer = normalizeSha256(caller.signerSha256)
         val existing = store.get(caller.packageName)?.let { followRotation(it, caller) }
@@ -135,9 +142,9 @@ class OpenLinkHostCore(
     fun decision(caller: OpenLinkCaller): OpenLinkDecision {
         val record = store.get(caller.packageName)
         if (record == null || !signedBy(record, caller)) {
-            return OpenLinkDecision(OpenLink.PROTOCOL_VERSION, OpenLinkTrust.PENDING, emptySet())
+            return OpenLinkDecision(versionOf(caller.packageName), OpenLinkTrust.PENDING, emptySet())
         }
-        return decisionFor(record, OpenLink.PROTOCOL_VERSION)
+        return decisionFor(record, versionOf(caller.packageName))
     }
 
     /**
@@ -217,6 +224,7 @@ class OpenLinkHostCore(
             )
         } else {
             store.remove(packageName)
+            versions.remove(packageName)
             _clients.value = store.all()
             notices += { onTrustChanged(packageName, existing, null) }
         }
@@ -255,7 +263,7 @@ class OpenLinkHostCore(
         val overflow = (pending - stale.toSet()).sortedByDescending { it.lastSeenAtMillis }.drop(MAX_PENDING - 1)
         val dropped = stale + overflow
         if (dropped.isEmpty()) return
-        dropped.forEach { store.remove(it.packageName) }
+        dropped.forEach { store.remove(it.packageName); versions.remove(it.packageName) }
         _clients.value = store.all()
         dropped.forEach { record -> notices += { onTrustChanged(record.packageName, record, null) } }
     }
