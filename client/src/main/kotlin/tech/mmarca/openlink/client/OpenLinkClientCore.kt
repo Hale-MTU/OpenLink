@@ -419,7 +419,8 @@ class OpenLinkClientCore(
         }
 
         fun onSettingsChanged(settings: OpenLinkSettings) {
-            if (settingsAllowed()) _hostSettings.value = settings.valid(clock())
+            // Newer per key: the host's answer and its app's publish may arrive in either order.
+            if (settingsAllowed()) _hostSettings.value = settings.valid(clock()).merge(_hostSettings.value)
         }
 
         fun onDevicesChanged(devices: List<OpenLinkDevice>) {

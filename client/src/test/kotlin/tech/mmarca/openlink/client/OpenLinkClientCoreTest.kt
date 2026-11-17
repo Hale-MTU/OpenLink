@@ -127,6 +127,19 @@ class OpenLinkClientCoreTest {
     }
 
     @Test
+    fun `an older copy of the host's settings arriving late changes no key`() {
+        core.onConnected(FakeHost(trusted), NoListener)
+        val older = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50)
+        val newer = older.with(OpenLinkSettingKeys.GOAL_STEPS, listOf(9_000.0), 60)
+            .with(OpenLinkSettingKeys.GOAL_FLOORS, listOf(12.0), 60)
+
+        core.events.onSettingsChanged(newer)
+        core.events.onSettingsChanged(older)
+
+        assertThat(core.hostSettings.value).isEqualTo(newer)
+    }
+
+    @Test
     fun `the host's settings come in checked, and not without the capability`() {
         val host = FakeHost(trusted).apply {
             hostSettings = OpenLinkSettings(

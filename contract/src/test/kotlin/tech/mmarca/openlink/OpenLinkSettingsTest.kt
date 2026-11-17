@@ -32,6 +32,12 @@ class OpenLinkSettingsTest {
     }
 
     @Test
+    fun `a key of whole numbers drops a fraction`() {
+        assertThat(of(GOAL_STEPS.name to OpenLinkSetting(8_000.5, now)).valid(now).isEmpty).isTrue()
+        assertThat(of(GOAL_STEPS.name to OpenLinkSetting(8_000.0, now)).valid(now).number(GOAL_STEPS)).isEqualTo(8_000.0)
+    }
+
+    @Test
     fun `zone limits must rise from zone 1 to zone 5`() {
         val rising = listOf(100.0, 120.0, 140.0, 160.0, 180.0)
         assertThat(of(ZONES_LOWER_BPM.name to OpenLinkSetting(rising, now)).valid(now).numbers(ZONES_LOWER_BPM)).isEqualTo(rising)

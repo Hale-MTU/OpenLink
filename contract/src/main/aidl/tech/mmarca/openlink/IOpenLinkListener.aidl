@@ -30,6 +30,9 @@ oneway interface IOpenLinkListener {
     void onDataWritten(in OpenLinkDataWritten written);
 
     // version 3. Appended last; the host sends it only to a client that negotiated version 3.
-    /** The host's settings changed: all of them, each with its time (capability settings). */
+    /**
+     * The host's settings, all of them, each with its time (capability settings): when they
+     * changed, and as the answer to the caller's setSettings.
+     */
     void onSettingsChanged(in OpenLinkSettings settings);
 }

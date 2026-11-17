@@ -210,6 +210,9 @@ class OpenLinkHost(
             // A count, never a key or a value.
             if (valid.entries.size < received.entries.size) Log.i(TAG, "dropped ${received.entries.size - valid.entries.size} settings")
             if (!valid.isEmpty) capabilities.setSettings(caller, valid)
+            // The answer: what the host holds now. The caller reads from it what was taken.
+            val held = capabilities.settings().valid(System.currentTimeMillis())
+            broadcastTo(caller.packageName, OpenLink.CAPABILITY_SETTINGS) { listener, _ -> listener.onSettingsChanged(held) }
         }
 
         override fun getSettings(): OpenLinkSettings =

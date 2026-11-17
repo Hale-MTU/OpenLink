@@ -43,7 +43,10 @@ interface IOpenLinkHost {
     oneway void resumeRecording(String sessionId, long atMillis);
 
     // settings, version 3. Appended last so the transaction codes of versions 1 and 2 stay.
-    /** The settings the caller changed, each with its time; the host keeps the newer per key. */
+    /**
+     * The settings the caller changed, each with its time; the host keeps the newer per key and
+     * answers with onSettingsChanged to the caller, its settings as it then holds them.
+     */
     oneway void setSettings(in OpenLinkSettings settings);
     OpenLinkSettings getSettings();
 }

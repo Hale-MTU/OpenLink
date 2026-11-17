@@ -1,6 +1,6 @@
 # OpenLink: the control channel between OpenVitals and OpenWatch
 
-Version 1, draft. Health data travels through Health Connect. OpenLink carries what Health
+Version 3, draft. Health data travels through Health Connect. OpenLink carries what Health
 Connect cannot: a body profile, the user's goals and limits, the state of paired devices, a
 request to start or stop a recording on a wearable, and the live samples a recording needs
 while it runs. It is an
@@ -141,7 +141,7 @@ The consent screen names each capability in plain words:
 | `devices` | "See your paired watches and scale, their battery and last sync, and start a sync" |
 | `recording` | "Start and stop a recording on your watch when it records an activity" |
 | `live` | "Receive heart rate, cadence and power from your watch while it records" |
-| `settings` | "Share your daily goals and heart rate zone limits with OpenWatch, both ways" |
+| `settings` | "Share your goals, limits and display choices with OpenWatch, both ways" |
 
 ### What the host shows
 
@@ -280,6 +280,17 @@ key by key, so a goal changed in one app and a limit changed in the other both s
 sender sends the keys it changed; the host sends all of its own with `onSettingsChanged`. An
 empty value is a cleared setting, so a removal crosses too.
 
+The host answers every `setSettings` with `onSettingsChanged` to the caller: all its settings
+as it holds them after the change. That answer is the receipt, and the caller reads the outcome
+of each key it sent from it:
+
+- the key holds the time the caller sent: taken;
+- it holds a later time: a newer change elsewhere won;
+- it holds an earlier time or is missing: dropped (a key or value the host does not accept).
+
+The host's app also publishes its settings to every client, so the answer and the publish may
+arrive in either order. A client keeps the newer per key of what it hears.
+
 The transport does not know any one setting: a new one is a row in the table below and an
 entry in `OpenLinkSettingKeys`, with no new method, no new protocol version and no new consent.
 What keeps the capability from becoming a way to carry anything:
@@ -293,8 +304,19 @@ What keeps the capability from becoming a way to carry anything:
 - **What may be a key.** A choice the user made: a goal, a limit, a unit. Never a reading or
   anything derived from one (a heart rate, a weight, a sleep score): that is health data, and it
   travels through Health Connect or the `profile` capability, under their own consent.
+- **The user's, not a device's.** A setting holds for the user in every app and on every
+  device. A setting of one watch is not a key: the name of a key is fixed, so it cannot name a
+  device.
+- **A key never changes.** Once released, its count, range and whole-number rule stay. A side
+  with an older library drops a value outside the key as it knew it, without a word, so a wider
+  range or another count is a new key name. A new key works once both apps carry a library that
+  lists it; until then the side without it drops it.
+- **Whole numbers where the key says so.** Every key below takes whole numbers; a unit or a
+  choice of several is a whole number, its meaning in the key's row.
 - **Its own consent.** `settings` is a capability like the others: asked for in `hello()`,
-  shown on the consent screen, revocable. Without it, or below version 3, nothing crosses.
+  shown on the consent screen, revocable. Without it, or below version 3, nothing crosses. The
+  consent names the kind of data (goals, limits, display choices), not each key, so a new key of
+  that kind needs no new consent. A key of another kind needs a new capability.
 - Logs count dropped settings; they never name a key's value.
 
 | Key | Numbers | Range | Meaning |

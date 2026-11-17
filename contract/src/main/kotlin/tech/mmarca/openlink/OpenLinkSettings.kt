@@ -3,6 +3,7 @@ package tech.mmarca.openlink
 import android.os.Bundle
 import android.os.Parcel
 import android.os.Parcelable
+import kotlin.math.floor
 
 /**
  * One setting: its numbers and when the user last changed it. Empty [values] means the user
@@ -13,9 +14,13 @@ data class OpenLinkSetting(val values: List<Double>, val updatedAtMillis: Long) 
 }
 
 /**
- * What a setting key may hold: [count] numbers, each in [min]..[max], ascending if
- * [ascending]. Numbers only: a setting is something the user chose (a goal, a limit), never a
- * reading, a name or free text, so the channel cannot carry such data under this capability.
+ * What a setting key may hold: [count] numbers, each in [min]..[max], whole numbers if
+ * [integer], ascending if [ascending]. Numbers only: a setting is something the user chose (a
+ * goal, a limit), never a reading, a name or free text, so the channel cannot carry such data
+ * under this capability.
+ *
+ * Once released, a key never changes: a side with an older library drops a value outside the
+ * key as it knew it, without a word. A wider range or another count is a new key name.
  */
 class OpenLinkSettingKey(
     val name: String,
@@ -23,12 +28,14 @@ class OpenLinkSettingKey(
     val min: Double,
     val max: Double,
     val ascending: Boolean = false,
+    val integer: Boolean = false,
 ) {
     /** Whether [values] fit this key. Empty always fits: the setting was cleared. */
     fun accepts(values: List<Double>): Boolean {
         if (values.isEmpty()) return true
         if (values.size != count) return false
         if (values.any { !it.isFinite() || it < min || it > max }) return false
+        if (integer && values.any { it != floor(it) }) return false
         return !ascending || values.zipWithNext().all { (a, b) -> a < b }
     }
 
@@ -43,16 +50,16 @@ class OpenLinkSettingKey(
  * uses; see "Settings" in docs/spec.md for what may never be one.
  */
 object OpenLinkSettingKeys {
-    val GOAL_STEPS = OpenLinkSettingKey("goal.steps", 1, 100.0, 100_000.0)
-    val GOAL_ACTIVE_CALORIES_KCAL = OpenLinkSettingKey("goal.active_calories_kcal", 1, 10.0, 5_000.0)
-    val GOAL_SLEEP_MINUTES = OpenLinkSettingKey("goal.sleep_minutes", 1, 60.0, 900.0)
-    val GOAL_DISTANCE_METERS = OpenLinkSettingKey("goal.distance_meters", 1, 100.0, 100_000.0)
-    val GOAL_FLOORS = OpenLinkSettingKey("goal.floors", 1, 1.0, 500.0)
-    val GOAL_ELEVATION_METERS = OpenLinkSettingKey("goal.elevation_meters", 1, 1.0, 5_000.0)
-    val GOAL_WATER_ML = OpenLinkSettingKey("goal.water_ml", 1, 100.0, 10_000.0)
+    val GOAL_STEPS = OpenLinkSettingKey("goal.steps", 1, 100.0, 100_000.0, integer = true)
+    val GOAL_ACTIVE_CALORIES_KCAL = OpenLinkSettingKey("goal.active_calories_kcal", 1, 10.0, 5_000.0, integer = true)
+    val GOAL_SLEEP_MINUTES = OpenLinkSettingKey("goal.sleep_minutes", 1, 60.0, 900.0, integer = true)
+    val GOAL_DISTANCE_METERS = OpenLinkSettingKey("goal.distance_meters", 1, 100.0, 100_000.0, integer = true)
+    val GOAL_FLOORS = OpenLinkSettingKey("goal.floors", 1, 1.0, 500.0, integer = true)
+    val GOAL_ELEVATION_METERS = OpenLinkSettingKey("goal.elevation_meters", 1, 1.0, 5_000.0, integer = true)
+    val GOAL_WATER_ML = OpenLinkSettingKey("goal.water_ml", 1, 100.0, 10_000.0, integer = true)
 
     /** The user's own heart rate zone limits: the lowest bpm of zones 1 to 5. */
-    val ZONES_LOWER_BPM = OpenLinkSettingKey("zones.lower_bpm", 5, 30.0, 250.0, ascending = true)
+    val ZONES_LOWER_BPM = OpenLinkSettingKey("zones.lower_bpm", 5, 30.0, 250.0, ascending = true, integer = true)
 
     val ALL: Map<String, OpenLinkSettingKey> = listOf(
         GOAL_STEPS,
