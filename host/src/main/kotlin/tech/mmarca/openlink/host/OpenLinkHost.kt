@@ -204,15 +204,11 @@ class OpenLinkHost(
         }
 
         override fun setSettings(settings: OpenLinkSettings?) = gated(OpenLink.CAPABILITY_SETTINGS) { caller ->
-            val received = settings ?: OpenLinkSettings.EMPTY
-            val valid = received.valid(System.currentTimeMillis())
-            // A count, never a key or a value.
-            if (valid.entries.size < received.entries.size) Log.i(TAG, "dropped ${received.entries.size - valid.entries.size} settings")
             // The host app answers by publishing once it holds the change. When nothing reached it, the library answers.
-            val handed = !valid.isEmpty && runCatching { capabilities.setSettings(caller, valid) }
-                .onFailure { Log.w(TAG, "the host app refused settings: ${it.javaClass.simpleName}") }
-                .isSuccess
-            if (!handed) broadcastTo(caller.packageName, OpenLink.CAPABILITY_SETTINGS) { listener, _ -> listener.onSettingsChanged(heldSettings()) }
+            val answerHere = handOverSettings(settings ?: OpenLinkSettings.EMPTY, System.currentTimeMillis(), { Log.i(TAG, it) }) {
+                capabilities.setSettings(caller, it)
+            }
+            if (answerHere) broadcastTo(caller.packageName, OpenLink.CAPABILITY_SETTINGS) { listener, _ -> listener.onSettingsChanged(heldSettings()) }
         }
 
         override fun getSettings(): OpenLinkSettings =
