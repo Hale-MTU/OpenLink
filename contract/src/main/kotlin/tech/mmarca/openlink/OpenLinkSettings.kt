@@ -94,17 +94,20 @@ data class OpenLinkSettings(val entries: Map<String, OpenLinkSetting> = emptyMap
         OpenLinkSettings(entries + (key.name to OpenLinkSetting(values, atMillis)))
 
     /**
-     * Only what may cross: keys OpenLink knows, values that fit them, and a time that is set and
-     * not more than a day ahead of [nowMillis]. A time far ahead would pin a value the other side
-     * could never replace.
+     * Only what may cross: keys OpenLink knows, values that fit them, and a time that is set. A
+     * time more than a day ahead of [nowMillis] counts as [nowMillis]: kept as it is, it would
+     * pin a value the other side could never replace.
+     *
+     * A side that keeps settings passes what it holds through this too, before it merges, so a
+     * time its own clock set ahead before it was put right does not pin a value either.
      */
     fun valid(nowMillis: Long): OpenLinkSettings = OpenLinkSettings(
-        entries.filter { (name, setting) ->
-            val key = OpenLinkSettingKeys.ALL[name] ?: return@filter false
-            setting.updatedAtMillis > 0L &&
-                setting.updatedAtMillis <= nowMillis + MAX_CLOCK_AHEAD_MILLIS &&
-                key.accepts(setting.values)
-        },
+        entries.mapNotNull { (name, setting) ->
+            val key = OpenLinkSettingKeys.ALL[name] ?: return@mapNotNull null
+            if (setting.updatedAtMillis <= 0L || !key.accepts(setting.values)) return@mapNotNull null
+            val ahead = setting.updatedAtMillis > nowMillis + MAX_CLOCK_AHEAD_MILLIS
+            name to if (ahead) setting.copy(updatedAtMillis = nowMillis) else setting
+        }.toMap(),
     )
 
     /** These settings with every key of [other] that is newer here; a tie keeps this side's. */
@@ -142,10 +145,14 @@ data class OpenLinkSettings(val entries: Map<String, OpenLinkSetting> = emptyMap
 
         val EMPTY = OpenLinkSettings()
 
-        /** Reads only the keys OpenLink knows; [valid] still checks their values. */
+        /**
+         * Reads every entry, unknown keys too, so [valid] drops them and the receiver can count
+         * what it dropped. [valid] also checks the values.
+         */
+        @Suppress("DEPRECATION") // get(): getBundle() logs the key of a value that is not a Bundle.
         fun fromBundle(bundle: Bundle): OpenLinkSettings = OpenLinkSettings(
-            OpenLinkSettingKeys.ALL.keys.mapNotNull { name ->
-                val entry = bundle.getBundle(name) ?: return@mapNotNull null
+            bundle.keySet().mapNotNull { name ->
+                val entry = bundle.get(name) as? Bundle ?: return@mapNotNull null
                 val values = entry.getDoubleArray(KEY_VALUES) ?: return@mapNotNull null
                 name to OpenLinkSetting(values.toList(), entry.getLong(KEY_UPDATED_AT, 0L))
             }.toMap(),

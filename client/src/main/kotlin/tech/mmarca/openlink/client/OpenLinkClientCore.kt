@@ -75,6 +75,8 @@ class OpenLinkClientCore(
     private val requestedCapabilities: Set<String>,
     private val appVersion: String,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** A line for the log: counts and names of capabilities, never a value. */
+    private val log: (String) -> Unit = {},
 ) {
     private val _status = MutableStateFlow<OpenLinkStatus>(OpenLinkStatus.Stopped)
     val status: StateFlow<OpenLinkStatus> = _status.asStateFlow()
@@ -170,6 +172,7 @@ class OpenLinkClientCore(
         host = null
         _status.value = if (installed) OpenLinkStatus.Unreachable else OpenLinkStatus.HostMissing
         _devices.value = emptyList()
+        _hostSettings.value = OpenLinkSettings.EMPTY
     }
 
     /** The host package is there, but its key is neither known nor approved: stay away from it. */
@@ -189,6 +192,7 @@ class OpenLinkClientCore(
         host = null
         _status.value = OpenLinkStatus.Stopped
         _devices.value = emptyList()
+        _hostSettings.value = OpenLinkSettings.EMPTY
     }
 
     /** The binding broke; keep the wishes for the next connection. */
@@ -220,7 +224,7 @@ class OpenLinkClientCore(
      */
     fun setSettings(settings: OpenLinkSettings) {
         // The app's later call wins a tie: it is the user's last choice.
-        pendingSettings = settings.valid(clock()).merge(pendingSettings)
+        pendingSettings = settings.checked().merge(pendingSettings)
         flushSettings()
     }
 
@@ -304,8 +308,13 @@ class OpenLinkClientCore(
         if (pause) host?.pauseRecording(sessionId, atMillis) else host?.resumeRecording(sessionId, atMillis)
     }
 
-    private fun settingsAllowed(state: OpenLinkState? = state()): Boolean =
-        state != null && state.protocolVersion >= OpenLink.SETTINGS_VERSION && state.has(OpenLink.CAPABILITY_SETTINGS)
+    /** [valid], with a count in the log of what it dropped. */
+    private fun OpenLinkSettings.checked(): OpenLinkSettings {
+        val valid = valid(clock())
+        val dropped = entries.size - valid.entries.size
+        if (dropped > 0) log("dropped $dropped settings")
+        return valid
+    }
 
     private fun applyState(state: OpenLinkState) {
         val before = state()
@@ -321,8 +330,10 @@ class OpenLinkClientCore(
         } else {
             _hostProfile.value = null
         }
-        if (settingsAllowed(state)) {
-            _hostSettings.value = host.settings?.valid(clock()) ?: OpenLinkSettings.EMPTY
+        // The host grants settings only to a pair that speaks version 3. The host's settings are read when
+        // the grant is newly there; after that its publishes keep them current.
+        if (state.has(OpenLink.CAPABILITY_SETTINGS)) {
+            if (before?.has(OpenLink.CAPABILITY_SETTINGS) != true) _hostSettings.value = host.settings?.checked() ?: OpenLinkSettings.EMPTY
             flushSettings()
         } else {
             _hostSettings.value = OpenLinkSettings.EMPTY
@@ -399,7 +410,7 @@ class OpenLinkClientCore(
     }
 
     private fun flushSettings() {
-        if (pendingSettings.isEmpty || !settingsAllowed()) return
+        if (pendingSettings.isEmpty || !granted(OpenLink.CAPABILITY_SETTINGS)) return
         host?.setSettings(pendingSettings) ?: return
         pendingSettings = OpenLinkSettings.EMPTY
     }
@@ -419,8 +430,8 @@ class OpenLinkClientCore(
         }
 
         fun onSettingsChanged(settings: OpenLinkSettings) {
-            // Newer per key: the host's answer and its app's publish may arrive in either order.
-            if (settingsAllowed()) _hostSettings.value = settings.valid(clock()).merge(_hostSettings.value)
+            // All of the host's settings, as it holds them: they replace what came before.
+            if (granted(OpenLink.CAPABILITY_SETTINGS)) _hostSettings.value = settings.checked()
         }
 
         fun onDevicesChanged(devices: List<OpenLinkDevice>) {

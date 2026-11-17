@@ -54,10 +54,18 @@ class OpenLinkSettingsTest {
     }
 
     @Test
-    fun `a change without a time, or dated more than a day ahead, is dropped`() {
+    fun `a change without a time is dropped`() {
         assertThat(of(GOAL_STEPS.name to OpenLinkSetting(9_000.0, 0)).valid(now).isEmpty).isTrue()
-        assertThat(of(GOAL_STEPS.name to OpenLinkSetting(9_000.0, now + day + 1)).valid(now).isEmpty).isTrue()
-        assertThat(of(GOAL_STEPS.name to OpenLinkSetting(9_000.0, now + day)).valid(now).isEmpty).isFalse()
+    }
+
+    @Test
+    fun `a change dated more than a day ahead counts as now, so it pins no value`() {
+        val ahead = of(GOAL_STEPS.name to OpenLinkSetting(9_000.0, now + day + 1)).valid(now)
+        assertThat(ahead.entries[GOAL_STEPS.name]).isEqualTo(OpenLinkSetting(9_000.0, now))
+        assertThat(ahead.merge(of(GOAL_STEPS.name to OpenLinkSetting(10_000.0, now + 1))).number(GOAL_STEPS)).isEqualTo(10_000.0)
+
+        val withinADay = of(GOAL_STEPS.name to OpenLinkSetting(9_000.0, now + day)).valid(now)
+        assertThat(withinADay.entries[GOAL_STEPS.name]?.updatedAtMillis).isEqualTo(now + day)
     }
 
     @Test

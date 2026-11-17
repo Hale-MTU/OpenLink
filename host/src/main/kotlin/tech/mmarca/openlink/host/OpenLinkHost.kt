@@ -204,25 +204,19 @@ class OpenLinkHost(
         }
 
         override fun setSettings(settings: OpenLinkSettings?) = gated(OpenLink.CAPABILITY_SETTINGS) { caller ->
-            if (core.versionOf(caller.packageName) < OpenLink.SETTINGS_VERSION) return@gated
-            val received = settings ?: return@gated
+            val received = settings ?: OpenLinkSettings.EMPTY
             val valid = received.valid(System.currentTimeMillis())
             // A count, never a key or a value.
             if (valid.entries.size < received.entries.size) Log.i(TAG, "dropped ${received.entries.size - valid.entries.size} settings")
-            if (!valid.isEmpty) capabilities.setSettings(caller, valid)
-            // The answer: what the host holds now. The caller reads from it what was taken.
-            val held = capabilities.settings().valid(System.currentTimeMillis())
-            broadcastTo(caller.packageName, OpenLink.CAPABILITY_SETTINGS) { listener, _ -> listener.onSettingsChanged(held) }
+            // The host app answers by publishing once it holds the change. When nothing reached it, the library answers.
+            val handed = !valid.isEmpty && runCatching { capabilities.setSettings(caller, valid) }
+                .onFailure { Log.w(TAG, "the host app refused settings: ${it.javaClass.simpleName}") }
+                .isSuccess
+            if (!handed) broadcastTo(caller.packageName, OpenLink.CAPABILITY_SETTINGS) { listener, _ -> listener.onSettingsChanged(heldSettings()) }
         }
 
         override fun getSettings(): OpenLinkSettings =
-            gatedValue(OpenLink.CAPABILITY_SETTINGS, OpenLinkSettings.EMPTY) { caller ->
-                if (core.versionOf(caller.packageName) < OpenLink.SETTINGS_VERSION) {
-                    OpenLinkSettings.EMPTY
-                } else {
-                    capabilities.settings().valid(System.currentTimeMillis())
-                }
-            }
+            gatedValue(OpenLink.CAPABILITY_SETTINGS, OpenLinkSettings.EMPTY) { heldSettings() }
     }
 
     // --- events the host app publishes
@@ -231,13 +225,16 @@ class OpenLinkHost(
         broadcast(OpenLink.CAPABILITY_PROFILE) { it.onProfileChanged(profile) }
 
     /**
-     * The host's settings changed (version 3): all of them, to every client trusted with
-     * settings that speaks version 3. Only valid ones leave the host.
+     * The host's settings (version 3), all of them, to every client trusted with settings: after
+     * every change, and after every [OpenLinkHostCapabilities.setSettings], whether it changed
+     * anything or not, since that is the caller's answer. Only valid ones leave the host.
      */
     fun publishSettings(settings: OpenLinkSettings) {
         val valid = settings.valid(System.currentTimeMillis())
-        broadcast(OpenLink.CAPABILITY_SETTINGS, minVersion = OpenLink.SETTINGS_VERSION) { it.onSettingsChanged(valid) }
+        broadcast(OpenLink.CAPABILITY_SETTINGS) { it.onSettingsChanged(valid) }
     }
+
+    private fun heldSettings(): OpenLinkSettings = capabilities.settings().valid(System.currentTimeMillis())
 
     fun publishDevices(devices: List<OpenLinkDevice>) =
         broadcast(OpenLink.CAPABILITY_DEVICES) { it.onDevicesChanged(devices) }

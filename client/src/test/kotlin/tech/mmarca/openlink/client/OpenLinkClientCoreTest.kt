@@ -114,8 +114,8 @@ class OpenLinkClientCoreTest {
     }
 
     @Test
-    fun `a version 2 host is sent no settings and shows none, until it speaks version 3`() {
-        val v2 = trusted.copy(protocolVersion = 2)
+    fun `a host that does not grant settings, as a version 2 host does not, is sent none and shows none`() {
+        val v2 = trusted.copy(protocolVersion = 2, grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_SETTINGS)
         val host = FakeHost(v2).apply { hostSettings = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50) }
         core.onConnected(host, NoListener)
 
@@ -127,16 +127,55 @@ class OpenLinkClientCoreTest {
     }
 
     @Test
-    fun `an older copy of the host's settings arriving late changes no key`() {
+    fun `the host's settings replace what the client held, a key it no longer holds included`() {
         core.onConnected(FakeHost(trusted), NoListener)
-        val older = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50)
-        val newer = older.with(OpenLinkSettingKeys.GOAL_STEPS, listOf(9_000.0), 60)
+        val both = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(9_000.0), 60)
             .with(OpenLinkSettingKeys.GOAL_FLOORS, listOf(12.0), 60)
+        val stepsOnly = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50)
 
-        core.events.onSettingsChanged(newer)
-        core.events.onSettingsChanged(older)
+        core.events.onSettingsChanged(both)
+        core.events.onSettingsChanged(stepsOnly)
 
-        assertThat(core.hostSettings.value).isEqualTo(newer)
+        assertThat(core.hostSettings.value).isEqualTo(stepsOnly)
+    }
+
+    @Test
+    fun `the host's settings are read when the grant is new, not on a change of another capability`() {
+        val host = FakeHost(trusted).apply { hostSettings = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50) }
+        core.onConnected(host, NoListener)
+        host.hostSettings = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(9_000.0), 60)
+
+        core.events.onStateChanged(trusted.copy(grantedCapabilities = OpenLink.ALL_CAPABILITIES - OpenLink.CAPABILITY_LIVE))
+
+        assertThat(core.hostSettings.value.number(OpenLinkSettingKeys.GOAL_STEPS)).isEqualTo(8_000.0)
+    }
+
+    @Test
+    fun `the host's settings are gone once the client stops or the host is gone`() {
+        val held = OpenLinkSettings().with(OpenLinkSettingKeys.GOAL_STEPS, listOf(8_000.0), 50)
+        core.onConnected(FakeHost(trusted).apply { hostSettings = held }, NoListener)
+        core.onHostMissing()
+        assertThat(core.hostSettings.value.isEmpty).isTrue()
+
+        core.onConnected(FakeHost(trusted).apply { hostSettings = held }, NoListener)
+        core.onStopped()
+        assertThat(core.hostSettings.value.isEmpty).isTrue()
+    }
+
+    @Test
+    fun `a dropped setting is counted in the log, without its key or value`() {
+        val lines = mutableListOf<String>()
+        val logged = OpenLinkClientCore(OpenLink.ALL_CAPABILITIES, "2.17.0", clock = { now }, log = { lines += it })
+        logged.setSettings(
+            OpenLinkSettings(
+                mapOf(
+                    OpenLinkSettingKeys.GOAL_STEPS.name to OpenLinkSetting(8_000.0, 50),
+                    "profile.name" to OpenLinkSetting(1.0, 50),
+                ),
+            ),
+        )
+
+        assertThat(lines).containsExactly("dropped 1 settings")
     }
 
     @Test
@@ -145,7 +184,7 @@ class OpenLinkClientCoreTest {
             hostSettings = OpenLinkSettings(
                 mapOf(
                     OpenLinkSettingKeys.GOAL_STEPS.name to OpenLinkSetting(8_000.0, 50),
-                    // Out of range: no step goal of a million.
+                    // Out of range: no floors goal of a million.
                     OpenLinkSettingKeys.GOAL_FLOORS.name to OpenLinkSetting(1_000_000.0, 50),
                 ),
             )

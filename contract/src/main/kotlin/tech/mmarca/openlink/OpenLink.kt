@@ -26,6 +26,13 @@ object OpenLink {
     val ALL_CAPABILITIES: Set<String> =
         setOf(CAPABILITY_PROFILE, CAPABILITY_DEVICES, CAPABILITY_RECORDING, CAPABILITY_LIVE, CAPABILITY_SETTINGS)
 
+    /** The first protocol version that carries a capability; one not named here is in version 1. */
+    val CAPABILITY_SINCE: Map<String, Int> = mapOf(CAPABILITY_SETTINGS to SETTINGS_VERSION)
+
+    /** The part of [capabilities] that a pair speaking [version] may use. */
+    fun usableAt(capabilities: Set<String>, version: Int): Set<String> =
+        capabilities.filterTo(linkedSetOf()) { (CAPABILITY_SINCE[it] ?: 1) <= version }
+
     fun permissionFor(hostPackage: String): String = hostPackage + PERMISSION_SUFFIX
 }
 

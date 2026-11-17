@@ -232,7 +232,7 @@ version 1, which reads an unknown phase as `FAILED`: it reports `RECORDING` inst
 host answers with `min(client, host)`, and both speak that version. Every parcelable is written as one `Bundle`:
 a reader ignores keys it does not know and defaults the ones it does not find, so either side
 may add a field. A method is never removed; a retired one becomes a
-no-op. A new capability is a new name in `requestedCapabilities`, ignored by an older host.
+no-op. A new capability is a new name in `requestedCapabilities`, ignored by an older host. A capability that came with a later version (`OpenLink.CAPABILITY_SINCE`) is granted only to a client that negotiated that version, so a check of the grant covers the version too.
 
 ### Data types
 
@@ -280,16 +280,18 @@ key by key, so a goal changed in one app and a limit changed in the other both s
 sender sends the keys it changed; the host sends all of its own with `onSettingsChanged`. An
 empty value is a cleared setting, so a removal crosses too.
 
-The host answers every `setSettings` with `onSettingsChanged` to the caller: all its settings
-as it holds them after the change. That answer is the receipt, and the caller reads the outcome
-of each key it sent from it:
+The host answers every `setSettings` with `onSettingsChanged`: all its settings as it holds
+them after the change. The host app sends it with its publish, once it holds the change, and
+publishes after every `setSettings`, even one that changed nothing; when nothing reached the host
+app (every entry dropped, or the app failed), the library answers with the settings as they are.
+That answer is the receipt, and the caller reads the outcome of each key it sent from it:
 
 - the key holds the time the caller sent: taken;
 - it holds a later time: a newer change elsewhere won;
 - it holds an earlier time or is missing: dropped (a key or value the host does not accept).
 
-The host's app also publishes its settings to every client, so the answer and the publish may
-arrive in either order. A client keeps the newer per key of what it hears.
+The answer goes to every client trusted with settings, as any publish does. Each one carries all
+of the host's settings, so a client replaces what it held with it.
 
 The transport does not know any one setting: a new one is a row in the table below and an
 entry in `OpenLinkSettingKeys`, with no new method, no new protocol version and no new consent.
@@ -299,8 +301,10 @@ What keeps the capability from becoming a way to carry anything:
   key's range. No text, no names, no identifiers.
 - **Known keys only.** A key not in `OpenLinkSettingKeys` is dropped, by the library on both
   sides, before the app sees it. So is a value that does not fit its key, a change without a
-  time, and one dated more than a day ahead of the receiver's clock (it would pin a value the
-  other side could never replace).
+  time. A time more than a day ahead of the receiver's clock counts as the receiver's now: kept,
+  it would pin a value the other side could never replace. A side that keeps settings passes what
+  it holds through the same check before it merges, so its own clock, once put right, does not pin
+  one either.
 - **What may be a key.** A choice the user made: a goal, a limit, a unit. Never a reading or
   anything derived from one (a heart rate, a weight, a sleep score): that is health data, and it
   travels through Health Connect or the `profile` capability, under their own consent.
@@ -314,7 +318,8 @@ What keeps the capability from becoming a way to carry anything:
 - **Whole numbers where the key says so.** Every key below takes whole numbers; a unit or a
   choice of several is a whole number, its meaning in the key's row.
 - **Its own consent.** `settings` is a capability like the others: asked for in `hello()`,
-  shown on the consent screen, revocable. Without it, or below version 3, nothing crosses. The
+  shown on the consent screen, revocable. The host grants it only to a client that negotiated
+  version 3, so without it, or below version 3, nothing crosses. The
   consent names the kind of data (goals, limits, display choices), not each key, so a new key of
   that kind needs no new consent. A key of another kind needs a new capability.
 - Logs count dropped settings; they never name a key's value.

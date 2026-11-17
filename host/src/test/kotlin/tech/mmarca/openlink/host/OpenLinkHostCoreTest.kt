@@ -107,6 +107,19 @@ class OpenLinkHostCoreTest {
     }
 
     @Test
+    fun `a capability of a later version is granted only to a client that speaks it`() {
+        val core = core()
+
+        val v2 = core.hello(vitals, OpenLinkHello(protocolVersion = 2, requestedCapabilities = all.requestedCapabilities))
+        assertThat(v2.capabilities).doesNotContain(OpenLink.CAPABILITY_SETTINGS)
+        assertThat(core.allows(vitals, OpenLink.CAPABILITY_SETTINGS)).isFalse()
+
+        val v3 = core.hello(vitals, OpenLinkHello(protocolVersion = 3, requestedCapabilities = all.requestedCapabilities))
+        assertThat(v3.capabilities).contains(OpenLink.CAPABILITY_SETTINGS)
+        assertThat(core.allows(vitals, OpenLink.CAPABILITY_SETTINGS)).isTrue()
+    }
+
+    @Test
     fun `the version a client negotiated is remembered per client`() {
         val core = core()
         assertThat(core.versionOf(vitals.packageName)).isEqualTo(1)

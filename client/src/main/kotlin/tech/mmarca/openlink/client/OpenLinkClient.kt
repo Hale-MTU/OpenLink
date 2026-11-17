@@ -56,7 +56,7 @@ class OpenLinkClient(
     private val knownHostSigners: Set<String> = emptySet(),
 ) {
     private val appContext = context.applicationContext
-    private val core = OpenLinkClientCore(requestedCapabilities, appVersion)
+    private val core = OpenLinkClientCore(requestedCapabilities, appVersion, log = { Log.i(TAG, it) })
     private val approvals = appContext.getSharedPreferences(APPROVALS_PREFS, Context.MODE_PRIVATE)
     private val serial = Dispatchers.IO.limitedParallelism(1)
     private val scope = CoroutineScope(SupervisorJob() + serial)

@@ -279,7 +279,8 @@ class OpenLinkHostCore(
     private fun decisionFor(record: OpenLinkClientRecord, version: Int): OpenLinkDecision = OpenLinkDecision(
         protocolVersion = version,
         trust = record.trust,
-        capabilities = if (record.trust == OpenLinkTrust.TRUSTED) record.capabilities else emptySet(),
+        // A capability newer than the pair's version is not granted, so every check of a grant covers the version too.
+        capabilities = if (record.trust == OpenLinkTrust.TRUSTED) OpenLink.usableAt(record.capabilities, version) else emptySet(),
     )
 
     companion object {
