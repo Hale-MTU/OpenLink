@@ -1,8 +1,9 @@
 # OpenLink: the control channel between OpenVitals and OpenWatch
 
-Version 1, draft. Health data travels through Health Connect. OpenLink carries what Health
-Connect cannot: a body profile, the state of paired devices, a request to start or stop a
-recording on a wearable, and the live samples a recording needs while it runs. It is an
+Version 3, draft. Health data travels through Health Connect. OpenLink carries what Health
+Connect cannot: a body profile, the user's goals and limits, the state of paired devices, a
+request to start or stop a recording on a wearable, and the live samples a recording needs
+while it runs. It is an
 Android IPC contract: a bound service with an AIDL interface, a trust store on the host, and
 a consent screen. No network, no account, no server.
 
@@ -93,7 +94,7 @@ The host keeps, per client package, a record:
 | `packageName` | the client |
 | `signerSha256` | the signing certificate the trust was given to |
 | `state` | `PENDING`, `TRUSTED`, `BLOCKED` |
-| `capabilities` | the granted subset of `profile`, `devices`, `recording`, `live` |
+| `capabilities` | the granted subset of `profile`, `devices`, `recording`, `live`, `settings` |
 | `updatedAt` | when the trust last changed |
 | `lastSeenAt` | when the client last said hello or went away |
 | `profileReceivedAt` | when the host last took a body profile from it |
@@ -140,6 +141,7 @@ The consent screen names each capability in plain words:
 | `devices` | "See your paired watches and scale, their battery and last sync, and start a sync" |
 | `recording` | "Start and stop a recording on your watch when it records an activity" |
 | `live` | "Receive heart rate, cadence and power from your watch while it records" |
+| `settings` | "Share your goals, limits and display choices with OpenWatch, both ways" |
 
 ### What the host shows
 
@@ -171,6 +173,9 @@ interface IOpenLinkHost {
     // recording, version 2 (appended last: the transaction codes of version 1 stay)
     oneway void pauseRecording(String sessionId, long atMillis);
     oneway void resumeRecording(String sessionId, long atMillis);
+    // settings, version 3 (appended last)
+    oneway void setSettings(in OpenLinkSettings settings);
+    OpenLinkSettings getSettings();
 }
 
 oneway interface IOpenLinkListener {
@@ -181,6 +186,8 @@ oneway interface IOpenLinkListener {
     void onLiveSamples(in OpenLinkLiveBatch batch);
     // version 2 (appended last), sent only to a client that negotiated version 2
     void onDataWritten(in OpenLinkDataWritten written);                // capability devices
+    // version 3 (appended last), sent only to a client that negotiated version 3
+    void onSettingsChanged(in OpenLinkSettings settings);              // capability settings
 }
 ```
 
@@ -213,7 +220,9 @@ so an old client never crashes against a stricter host.
 
 ### Versioning
 
-`protocolVersion` is an integer, 2 in this version. Version 2 adds `RECORD` mode, the `PAUSED`
+`protocolVersion` is an integer, 3 in this version. Version 3 adds the `settings` capability,
+`setSettings`, `getSettings` and `onSettingsChanged` (see Settings below); a side that
+negotiated an older version sends and accepts no settings. Version 2 adds `RECORD` mode, the `PAUSED`
 phase, `pauseRecording` and `resumeRecording`, the workout summary, `onDataWritten`, and the
 device fields `recordingFeatures`, `exerciseTypes`, `measurements`, `lastSyncResult` and
 `lastSyncAttemptAtMillis`. A client sends `RECORD` only when the host answered version 2 or higher (a host
@@ -223,13 +232,15 @@ version 1, which reads an unknown phase as `FAILED`: it reports `RECORDING` inst
 host answers with `min(client, host)`, and both speak that version. Every parcelable is written as one `Bundle`:
 a reader ignores keys it does not know and defaults the ones it does not find, so either side
 may add a field. A method is never removed; a retired one becomes a
-no-op. A new capability is a new name in `requestedCapabilities`, ignored by an older host.
+no-op. A new capability is a new name in `requestedCapabilities`, ignored by an older host. A capability that came with a later version (`OpenLink.CAPABILITY_SINCE`) is granted only to a client that negotiated that version, so a check of the grant covers the version too.
 
 ### Data types
 
 - `OpenLinkProfile`: `birthYear`, `sex` (`FEMALE`, `MALE`, or null), `heightCm`, `weightKg`,
   `restingHeartRateBpm`, `maxHeartRateBpm`, all nullable, and `updatedAtMillis`. The last
   writer wins; each side keeps the time of its last change and ignores an older copy.
+- `OpenLinkSettings` (version 3): settings by key, each with its numbers and `updatedAtMillis`;
+  see Settings.
 - `OpenLinkDevice`: `id`, `displayName`, `kind` (`WATCH`, `BIKE_COMPUTER`, `SCALE`),
   `integration` (`GARMIN`, `WEAROS`, `XIAOMI`), `connection` (`CONNECTED`, `DISCONNECTED`,
   `UNKNOWN`), `batteryPercent`, `batteryUpdatedAtMillis`, `lastSyncedAtMillis`, `syncing`,
@@ -260,6 +271,69 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
 - `OpenLinkLiveBatch`: `sessionId`, `deviceId`, and samples (`type`, `atMillis`, `value`),
   batched by the host at most once a second. The host stamps each sample; the client takes
   `atMillis` as the sample's time.
+
+### Settings (version 3)
+
+What the user chose in one app and the other app shows or uses: a daily goal, their own heart
+rate zone limits. Both sides keep them; each change carries its time, and the newer value wins
+key by key, so a goal changed in one app and a limit changed in the other both survive. A
+sender sends the keys it changed; the host sends all of its own with `onSettingsChanged`. An
+empty value is a cleared setting, so a removal crosses too.
+
+The host answers every `setSettings` with `onSettingsChanged`: all its settings as it holds
+them after the change. The host app sends it with its publish, once it holds the change, and
+publishes after every `setSettings`, even one that changed nothing; when nothing reached the host
+app (every entry dropped, or the app failed), the library answers with the settings as they are.
+That answer is the receipt, and the caller reads the outcome of each key it sent from it:
+
+- the key holds the time the caller sent: taken;
+- it holds a later time: a newer change elsewhere won;
+- it holds an earlier time or is missing: dropped (a key or value the host does not accept).
+
+The answer goes to every client trusted with settings, as any publish does. Each one carries all
+of the host's settings, so a client replaces what it held with it.
+
+The transport does not know any one setting: a new one is a row in the table below and an
+entry in `OpenLinkSettingKeys`, with no new method, no new protocol version and no new consent.
+What keeps the capability from becoming a way to carry anything:
+
+- **Numbers only.** A value is a list of numbers of the length its key fixes, each within the
+  key's range. No text, no names, no identifiers.
+- **Known keys only.** A key not in `OpenLinkSettingKeys` is dropped, by the library on both
+  sides, before the app sees it. So is a value that does not fit its key, a change without a
+  time. A time more than a day ahead of the receiver's clock counts as the receiver's now: kept,
+  it would pin a value the other side could never replace. A side that keeps settings passes what
+  it holds through the same check before it merges, so its own clock, once put right, does not pin
+  one either.
+- **What may be a key.** A choice the user made: a goal, a limit, a unit. Never a reading or
+  anything derived from one (a heart rate, a weight, a sleep score): that is health data, and it
+  travels through Health Connect or the `profile` capability, under their own consent.
+- **The user's, not a device's.** A setting holds for the user in every app and on every
+  device. A setting of one watch is not a key: the name of a key is fixed, so it cannot name a
+  device.
+- **A key never changes.** Once released, its count, range and whole-number rule stay. A side
+  with an older library drops a value outside the key as it knew it, without a word, so a wider
+  range or another count is a new key name. A new key works once both apps carry a library that
+  lists it; until then the side without it drops it.
+- **Whole numbers where the key says so.** Every key below takes whole numbers; a unit or a
+  choice of several is a whole number, its meaning in the key's row.
+- **Its own consent.** `settings` is a capability like the others: asked for in `hello()`,
+  shown on the consent screen, revocable. The host grants it only to a client that negotiated
+  version 3, so without it, or below version 3, nothing crosses. The
+  consent names the kind of data (goals, limits, display choices), not each key, so a new key of
+  that kind needs no new consent. A key of another kind needs a new capability.
+- Logs count dropped settings; they never name a key's value.
+
+| Key | Numbers | Range | Meaning |
+| --- | --- | --- | --- |
+| `goal.steps` | 1 | 100 to 100 000 | daily steps |
+| `goal.active_calories_kcal` | 1 | 10 to 5 000 | daily active energy, kcal |
+| `goal.sleep_minutes` | 1 | 60 to 900 | sleep per night, minutes |
+| `goal.distance_meters` | 1 | 100 to 100 000 | daily distance, m |
+| `goal.floors` | 1 | 1 to 500 | floors climbed per day |
+| `goal.elevation_meters` | 1 | 1 to 5 000 | daily ascent, m |
+| `goal.water_ml` | 1 | 100 to 10 000 | daily water, ml |
+| `zones.lower_bpm` | 5 | 30 to 250, rising | the user's own lowest bpm of zones 1 to 5 |
 
 ### Delegated recording (version 2)
 
@@ -346,7 +420,7 @@ and `POWER` are in the contract for a host that streams a bike sensor or a watch
 broadcasts them.
 
 What the channel never carries: a Health Connect record, a route, a file, a name of a
-notification, or anything that identifies a third person. Log lines on both sides count
+notification, free text in a setting, or anything that identifies a third person. Log lines on both sides count
 calls and name capabilities; they never log a value.
 
 ## Library

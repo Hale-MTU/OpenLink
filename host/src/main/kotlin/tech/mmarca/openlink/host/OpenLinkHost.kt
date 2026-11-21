@@ -24,6 +24,7 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkState
 import tech.mmarca.openlink.OpenLinkTrust
 
@@ -201,12 +202,35 @@ class OpenLinkHost(
                 capabilities.unsubscribeLive(caller, sessionId)
             }
         }
+
+        override fun setSettings(settings: OpenLinkSettings?) = gated(OpenLink.CAPABILITY_SETTINGS) { caller ->
+            // The host app answers by publishing once it holds the change. When nothing reached it, the library answers.
+            val answerHere = handOverSettings(settings ?: OpenLinkSettings.EMPTY, System.currentTimeMillis(), { Log.i(TAG, it) }) {
+                capabilities.setSettings(caller, it)
+            }
+            if (answerHere) broadcastTo(caller.packageName, OpenLink.CAPABILITY_SETTINGS) { listener, _ -> listener.onSettingsChanged(heldSettings()) }
+        }
+
+        override fun getSettings(): OpenLinkSettings =
+            gatedValue(OpenLink.CAPABILITY_SETTINGS, OpenLinkSettings.EMPTY) { heldSettings() }
     }
 
     // --- events the host app publishes
 
     fun publishProfile(profile: OpenLinkProfile) =
         broadcast(OpenLink.CAPABILITY_PROFILE) { it.onProfileChanged(profile) }
+
+    /**
+     * The host's settings (version 3), all of them, to every client trusted with settings: after
+     * every change, and after every [OpenLinkHostCapabilities.setSettings], whether it changed
+     * anything or not, since that is the caller's answer. Only valid ones leave the host.
+     */
+    fun publishSettings(settings: OpenLinkSettings) {
+        val valid = settings.valid(System.currentTimeMillis())
+        broadcast(OpenLink.CAPABILITY_SETTINGS) { it.onSettingsChanged(valid) }
+    }
+
+    private fun heldSettings(): OpenLinkSettings = capabilities.settings().valid(System.currentTimeMillis())
 
     fun publishDevices(devices: List<OpenLinkDevice>) =
         broadcast(OpenLink.CAPABILITY_DEVICES) { it.onDevicesChanged(devices) }

@@ -20,6 +20,7 @@ import tech.mmarca.openlink.OpenLinkRecordingMode
 import tech.mmarca.openlink.OpenLinkRecordingPhase
 import tech.mmarca.openlink.OpenLinkRecordingRequest
 import tech.mmarca.openlink.OpenLinkRecordingState
+import tech.mmarca.openlink.OpenLinkSettings
 import tech.mmarca.openlink.OpenLinkSigners
 import tech.mmarca.openlink.OpenLinkState
 
@@ -74,6 +75,8 @@ class OpenLinkClientCore(
     private val requestedCapabilities: Set<String>,
     private val appVersion: String,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** A line for the log: counts and names of capabilities, never a value. */
+    private val log: (String) -> Unit = {},
 ) {
     private val _status = MutableStateFlow<OpenLinkStatus>(OpenLinkStatus.Stopped)
     val status: StateFlow<OpenLinkStatus> = _status.asStateFlow()
@@ -83,6 +86,14 @@ class OpenLinkClientCore(
 
     private val _hostProfile = MutableStateFlow<OpenLinkProfile?>(null)
     val hostProfile: StateFlow<OpenLinkProfile?> = _hostProfile.asStateFlow()
+
+    private val _hostSettings = MutableStateFlow(OpenLinkSettings.EMPTY)
+
+    /**
+     * The host's settings (version 3, capability settings), checked: only keys OpenLink knows,
+     * with values that fit them. Empty without the capability or on an older host.
+     */
+    val hostSettings: StateFlow<OpenLinkSettings> = _hostSettings.asStateFlow()
 
     private val _recordingStates = MutableSharedFlow<OpenLinkRecordingState>(extraBufferCapacity = 16, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     /**
@@ -107,6 +118,9 @@ class OpenLinkClientCore(
 
     private var host: IOpenLinkHost? = null
     private var pendingProfile: OpenLinkProfile? = null
+
+    /** Settings the app changed that the host has not taken yet; the newer per key wins. */
+    private var pendingSettings = OpenLinkSettings.EMPTY
 
     /** Where a recording session stands with the host. */
     private enum class Phase {
@@ -158,6 +172,7 @@ class OpenLinkClientCore(
         host = null
         _status.value = if (installed) OpenLinkStatus.Unreachable else OpenLinkStatus.HostMissing
         _devices.value = emptyList()
+        _hostSettings.value = OpenLinkSettings.EMPTY
     }
 
     /** The host package is there, but its key is neither known nor approved: stay away from it. */
@@ -168,6 +183,7 @@ class OpenLinkClientCore(
         _status.value = OpenLinkStatus.HostUntrusted(signerSha256)
         _devices.value = emptyList()
         _hostProfile.value = null
+        _hostSettings.value = OpenLinkSettings.EMPTY
     }
 
     fun onStopped() {
@@ -176,6 +192,7 @@ class OpenLinkClientCore(
         host = null
         _status.value = OpenLinkStatus.Stopped
         _devices.value = emptyList()
+        _hostSettings.value = OpenLinkSettings.EMPTY
     }
 
     /** The binding broke; keep the wishes for the next connection. */
@@ -198,6 +215,17 @@ class OpenLinkClientCore(
     fun setProfile(profile: OpenLinkProfile) {
         pendingProfile = profile
         flushProfile()
+    }
+
+    /**
+     * Sends the settings the app changed now if allowed, else when the host next allows it
+     * (version 3, capability settings). Send only what changed, each with the time the user
+     * changed it; keys OpenLink does not know and values that do not fit are dropped here.
+     */
+    fun setSettings(settings: OpenLinkSettings) {
+        // The app's later call wins a tie: it is the user's last choice.
+        pendingSettings = settings.checked().merge(pendingSettings)
+        flushSettings()
     }
 
     fun requestSync(deviceId: String) {
@@ -280,6 +308,14 @@ class OpenLinkClientCore(
         if (pause) host?.pauseRecording(sessionId, atMillis) else host?.resumeRecording(sessionId, atMillis)
     }
 
+    /** [valid], with a count in the log of what it dropped. */
+    private fun OpenLinkSettings.checked(): OpenLinkSettings {
+        val valid = valid(clock())
+        val dropped = entries.size - valid.entries.size
+        if (dropped > 0) log("dropped $dropped settings")
+        return valid
+    }
+
     private fun applyState(state: OpenLinkState) {
         val before = state()
         // The host repeats the state when the listener registers; nothing to catch up on then.
@@ -293,6 +329,14 @@ class OpenLinkClientCore(
             flushProfile()
         } else {
             _hostProfile.value = null
+        }
+        // The host grants settings only to a pair that speaks version 3. The host's settings are read when
+        // the grant is newly there; after that its publishes keep them current.
+        if (state.has(OpenLink.CAPABILITY_SETTINGS)) {
+            if (before?.has(OpenLink.CAPABILITY_SETTINGS) != true) _hostSettings.value = host.settings?.checked() ?: OpenLinkSettings.EMPTY
+            flushSettings()
+        } else {
+            _hostSettings.value = OpenLinkSettings.EMPTY
         }
         // Replay what the app holds whenever the capability is newly there: after a reconnect
         // (before is null) or a grant. The host ignores a session it already has.
@@ -365,6 +409,12 @@ class OpenLinkClientCore(
         _profileExchangedAtMillis.value = clock()
     }
 
+    private fun flushSettings() {
+        if (pendingSettings.isEmpty || !granted(OpenLink.CAPABILITY_SETTINGS)) return
+        host?.setSettings(pendingSettings) ?: return
+        pendingSettings = OpenLinkSettings.EMPTY
+    }
+
     private fun List<OpenLinkDevice>.real(): List<OpenLinkDevice> = filter { it.id.isNotEmpty() }
 
     /** The listener's callbacks, forwarded by the binder side's stub. */
@@ -377,6 +427,11 @@ class OpenLinkClientCore(
             if (!granted(OpenLink.CAPABILITY_PROFILE)) return
             _hostProfile.value = profile.takeUnless { it.isEmpty }
             if (!profile.isEmpty) _profileExchangedAtMillis.value = clock()
+        }
+
+        fun onSettingsChanged(settings: OpenLinkSettings) {
+            // All of the host's settings, as it holds them: they replace what came before.
+            if (granted(OpenLink.CAPABILITY_SETTINGS)) _hostSettings.value = settings.checked()
         }
 
         fun onDevicesChanged(devices: List<OpenLinkDevice>) {
