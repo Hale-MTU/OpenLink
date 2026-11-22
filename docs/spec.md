@@ -241,8 +241,8 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
   writer wins; each side keeps the time of its last change and ignores an older copy.
 - `OpenLinkSettings` (version 3): settings by key, each with its numbers and `updatedAtMillis`;
   see Settings.
-- `OpenLinkDevice`: `id`, `displayName`, `kind` (`WATCH`, `BIKE_COMPUTER`, `SCALE`),
-  `integration` (`GARMIN`, `WEAROS`, `XIAOMI`), `connection` (`CONNECTED`, `DISCONNECTED`,
+- `OpenLinkDevice`: `id`, `displayName`, `kind` (`WATCH`, `BIKE_COMPUTER`, `SCALE` so far),
+  `integration` (`GARMIN`, `WEAROS`, `XIAOMI` so far), `connection` (`CONNECTED`, `DISCONNECTED`,
   `UNKNOWN`), `batteryPercent`, `batteryUpdatedAtMillis`, `lastSyncedAtMillis`, `syncing`,
   `supportsSync`, `supportsRecording`, `liveSampleTypes`, and from version 2 `recordingFeatures`
   (subset of `GPS`, `HEART_RATE`, `PAUSE`, `AUTO_PAUSE`: what the device does when it records a
@@ -250,6 +250,12 @@ no-op. A new capability is a new name in `requestedCapabilities`, ignored by an 
   `measurements` (subset of `HEART_RATE`, `HRV`, `SPO2`, `SKIN_TEMPERATURE`: what it measures),
   `lastSyncResult` (`SUCCEEDED`, `INTERRUPTED`, `PERMISSION_MISSING`, `DISCONNECTED`, `FAILED`)
   and `lastSyncAttemptAtMillis`; `lastSyncedAtMillis` stays the last sync that succeeded.
+  `kind` and `integration` are open sets: a host names a new kind of device, or a new
+  integration, without a new protocol version, and a reader keeps a device whose kind or
+  integration it has no constant for. A name is an upper-case letter followed by up to 31
+  upper-case letters, digits or underscores; a device without one is dropped. A reader on a
+  library from before open sets drops a device of a name it does not know, so a new name
+  reaches only clients that took the newer library; the known names cross unchanged.
 - `OpenLinkRecordingRequest`: `sessionId` (chosen by the client, unique), `exerciseType`
   (the Health Connect exercise type), `startedAtMillis`, `deviceId` (null: every device that
   supports recording), and from version 2 `mode` (`STREAM`, the default, or `RECORD`; `deviceId`

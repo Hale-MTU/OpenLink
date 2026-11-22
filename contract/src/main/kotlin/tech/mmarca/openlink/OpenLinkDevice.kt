@@ -74,12 +74,16 @@ data class OpenLinkDevice(
         private const val KEY_SYNC_RESULT = "lastSyncResult"
         private const val KEY_SYNC_ATTEMPT_AT = "lastSyncAttemptAtMillis"
 
-        /** Null when the bundle lacks what every device must have: an id, a name, a kind and an integration. */
+        /**
+         * Null when the bundle lacks what every device must have: an id, a name, a kind and an
+         * integration, the last two as names ([isOpenSetName]).
+         */
         fun fromBundleOrNull(bundle: Bundle): OpenLinkDevice? {
             val id = bundle.getString(KEY_ID) ?: return null
             val name = bundle.getString(KEY_NAME) ?: return null
-            val kind = bundle.getEnumOrNull<OpenLinkDeviceKind>(KEY_KIND) ?: return null
-            val integration = bundle.getEnumOrNull<OpenLinkIntegration>(KEY_INTEGRATION) ?: return null
+            // Open sets: a kind or an integration newer than this library is kept, not dropped.
+            val kind = OpenLinkDeviceKind.of(bundle.getString(KEY_KIND)) ?: return null
+            val integration = OpenLinkIntegration.of(bundle.getString(KEY_INTEGRATION)) ?: return null
             return OpenLinkDevice(
                 id = id,
                 displayName = name,

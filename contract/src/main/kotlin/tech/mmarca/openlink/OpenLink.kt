@@ -42,9 +42,44 @@ enum class OpenLinkTrust { PENDING, TRUSTED, BLOCKED }
 /** Biological sex as the body profile carries it. Null in the profile means not declared. */
 enum class OpenLinkSex { FEMALE, MALE }
 
-enum class OpenLinkDeviceKind { WATCH, BIKE_COMPUTER, SCALE }
+/**
+ * What a device is. An open set: a host may name a kind this library has no constant for, and
+ * a reader keeps the device. A reader on a library before open sets drops such a device, as it
+ * always did; the known names cross as they always did.
+ */
+@JvmInline
+value class OpenLinkDeviceKind(val name: String) {
+    override fun toString(): String = name
 
-enum class OpenLinkIntegration { GARMIN, WEAROS, XIAOMI }
+    companion object {
+        val WATCH = OpenLinkDeviceKind("WATCH")
+        val BIKE_COMPUTER = OpenLinkDeviceKind("BIKE_COMPUTER")
+        val SCALE = OpenLinkDeviceKind("SCALE")
+
+        /** [name] as a kind, or null when it is not a name: see [isOpenSetName]. */
+        fun of(name: String?): OpenLinkDeviceKind? = name?.takeIf(::isOpenSetName)?.let(::OpenLinkDeviceKind)
+    }
+}
+
+/** Which of the host's integrations owns a device. An open set, like [OpenLinkDeviceKind]. */
+@JvmInline
+value class OpenLinkIntegration(val name: String) {
+    override fun toString(): String = name
+
+    companion object {
+        val GARMIN = OpenLinkIntegration("GARMIN")
+        val WEAROS = OpenLinkIntegration("WEAROS")
+        val XIAOMI = OpenLinkIntegration("XIAOMI")
+
+        /** [name] as an integration, or null when it is not a name: see [isOpenSetName]. */
+        fun of(name: String?): OpenLinkIntegration? = name?.takeIf(::isOpenSetName)?.let(::OpenLinkIntegration)
+    }
+}
+
+/** A name in an open set: an upper-case letter, then up to 31 upper-case letters, digits or underscores. */
+fun isOpenSetName(name: String): Boolean = OpenSetName.matches(name)
+
+private val OpenSetName = Regex("[A-Z][A-Z0-9_]{0,31}")
 
 enum class OpenLinkConnection { CONNECTED, DISCONNECTED, UNKNOWN }
 
