@@ -340,6 +340,7 @@ What keeps the capability from becoming a way to carry anything:
 | `goal.elevation_meters` | 1 | 1 to 5 000 | daily ascent, m |
 | `goal.water_ml` | 1 | 100 to 10 000 | daily water, ml |
 | `zones.lower_bpm` | 5 | 30 to 250, rising | the user's own lowest bpm of zones 1 to 5 |
+| `units.system` | 1 | 0 to 2 | how the apps show a measurement: 0 as the phone's region measures, 1 metric, 2 imperial |
 
 ### Delegated recording (version 2)
 
