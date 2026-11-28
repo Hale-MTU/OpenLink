@@ -4,6 +4,10 @@ import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 import tech.mmarca.openlink.OpenLinkSettingKeys.GOAL_STEPS
 import tech.mmarca.openlink.OpenLinkSettingKeys.GOAL_WATER_ML
+import tech.mmarca.openlink.OpenLinkSettingKeys.UNITS_BY_REGION
+import tech.mmarca.openlink.OpenLinkSettingKeys.UNITS_IMPERIAL
+import tech.mmarca.openlink.OpenLinkSettingKeys.UNITS_METRIC
+import tech.mmarca.openlink.OpenLinkSettingKeys.UNITS_SYSTEM
 import tech.mmarca.openlink.OpenLinkSettingKeys.ZONES_LOWER_BPM
 
 class OpenLinkSettingsTest {
@@ -43,6 +47,15 @@ class OpenLinkSettingsTest {
         assertThat(of(ZONES_LOWER_BPM.name to OpenLinkSetting(rising, now)).valid(now).numbers(ZONES_LOWER_BPM)).isEqualTo(rising)
         val falling = rising.reversed()
         assertThat(of(ZONES_LOWER_BPM.name to OpenLinkSetting(falling, now)).valid(now).isEmpty).isTrue()
+    }
+
+    @Test
+    fun `the unit system is one of its three choices`() {
+        for (choice in listOf(UNITS_BY_REGION, UNITS_METRIC, UNITS_IMPERIAL)) {
+            assertThat(of(UNITS_SYSTEM.name to OpenLinkSetting(choice, now)).valid(now).number(UNITS_SYSTEM)).isEqualTo(choice)
+        }
+        assertThat(of(UNITS_SYSTEM.name to OpenLinkSetting(3.0, now)).valid(now).isEmpty).isTrue()
+        assertThat(of(UNITS_SYSTEM.name to OpenLinkSetting(1.5, now)).valid(now).isEmpty).isTrue()
     }
 
     @Test

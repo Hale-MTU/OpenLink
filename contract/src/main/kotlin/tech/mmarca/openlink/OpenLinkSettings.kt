@@ -61,6 +61,18 @@ object OpenLinkSettingKeys {
     /** The user's own heart rate zone limits: the lowest bpm of zones 1 to 5. */
     val ZONES_LOWER_BPM = OpenLinkSettingKey("zones.lower_bpm", 5, 30.0, 250.0, ascending = true, integer = true)
 
+    /** How the apps show a measurement: [UNITS_BY_REGION], [UNITS_METRIC] or [UNITS_IMPERIAL]. */
+    val UNITS_SYSTEM = OpenLinkSettingKey("units.system", 1, 0.0, 2.0, integer = true)
+
+    /** [UNITS_SYSTEM]: as the phone's region measures. */
+    const val UNITS_BY_REGION = 0.0
+
+    /** [UNITS_SYSTEM]: metric. */
+    const val UNITS_METRIC = 1.0
+
+    /** [UNITS_SYSTEM]: imperial. */
+    const val UNITS_IMPERIAL = 2.0
+
     val ALL: Map<String, OpenLinkSettingKey> = listOf(
         GOAL_STEPS,
         GOAL_ACTIVE_CALORIES_KCAL,
@@ -70,6 +82,7 @@ object OpenLinkSettingKeys {
         GOAL_ELEVATION_METERS,
         GOAL_WATER_ML,
         ZONES_LOWER_BPM,
+        UNITS_SYSTEM,
     ).associateBy { it.name }
 }
 
